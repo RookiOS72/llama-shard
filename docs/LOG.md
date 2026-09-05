@@ -169,3 +169,17 @@ concurrent sessions/cron jobs competing for the same small pool of
 cache slots. Worth deciding whether that tradeoff is acceptable, or
 whether the fix is a smaller/faster model, a trimmed-down tool set, or
 both.
+
+**Tested the "trim the tool set" option — it didn't help much.** Cut
+openclaw's loaded skills from 5 down to 1 (kept only email monitoring,
+dropped apple-notes/apple-reminders/1password/browser-automation since
+they weren't used day-to-day). Measured the resulting system prompt on a
+clean scratch session afterward: still **~28,240 tokens**, essentially
+unchanged from the ~24,576-30,722 baseline before the trim. Conclusion:
+the loaded skills list was not the dominant contributor to prompt size —
+the base `"coding"` tools profile itself (tool definitions, workspace
+`AGENTS.md`, etc.) is the bigger factor, and wasn't touched by this
+change. Next person picking this up should measure that directly (e.g.
+via `openclaw proxy` to inspect the actual assembled request) before
+assuming further skill trimming will help — it likely won't get you far
+on its own.
