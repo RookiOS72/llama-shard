@@ -6,8 +6,8 @@
   (the engine underneath it) has an RPC backend (`GGML_RPC`) that does
   cross-machine layer splitting. Decided to try it as "step 1" before
   considering anything bigger.
-- Set up SSH key-based access from `exo01` to `exo02` (`brenden@192.168.1.39`)
-  to make working across both machines practical.
+- Set up SSH key-based access from `node-a` to `node-b` (its LAN IP) to
+  make working across both machines practical.
 - Checked Homebrew's `llama.cpp` formula: it does **not** set `GGML_RPC` or
   `GGML_METAL` explicitly, relying on upstream defaults. Confirmed upstream
   defaults are `GGML_METAL_DEFAULT=ON` on Apple platforms (good) but
@@ -31,13 +31,13 @@
   lot given how much a plain network hop hurt exo's MLX pipeline earlier
   this session.
 - Build started on both machines (background). Next: once built, start
-  `rpc-server` on exo02, point `llama-server`/`llama-cli` at it from
-  exo01 with `--rpc`, load a real GGUF model split across both, and
+  `rpc-server` on node-b, point `llama-server`/`llama-cli` at it from
+  node-a with `--rpc`, load a real GGUF model split across both, and
   benchmark actual tok/s against what we saw with exo/MLX.
 - Created the public GitHub repo:
   [github.com/RookiOS72/llama-shard](https://github.com/RookiOS72/llama-shard).
   `gh` was already installed and authenticated, so no extra setup needed.
-- First build attempt on exo02 failed instantly (`nohup: cmake: No such
+- First build attempt on node-b failed instantly (`nohup: cmake: No such
   file or directory`) — the background SSH command didn't have Homebrew's
   `/opt/homebrew/bin` on `PATH` before invoking `cmake`. Non-interactive
   SSH sessions on macOS don't source the same shell profile as an
@@ -46,8 +46,8 @@
   `PATH="/opt/homebrew/bin:$PATH"` before the build command; restarted.
 - Both builds finished successfully. `ggml-rpc-server`, `llama-cli`, and
   `llama-server` all present in `build/bin/` on both machines.
-- Started `ggml-rpc-server` on exo02. First attempt used the default bind
-  host (`127.0.0.1`) and was unreachable from exo01 (`connection refused`)
+- Started `ggml-rpc-server` on node-b. First attempt used the default bind
+  host (`127.0.0.1`) and was unreachable from node-a (`connection refused`)
   — the RPC server only listens on localhost unless told otherwise.
   Restarted with `-H 0.0.0.0 -p 50052`, which printed this warning on
   startup (important, keep this in mind for anyone else using this repo):
@@ -58,8 +58,8 @@
   ```
   This is fine on a private LAN but should **not** be exposed beyond that
   — the RPC protocol has no auth/encryption. Confirmed reachable from
-  exo01 after the restart. Metal initialized correctly on exo02's GPU
+  node-a after the restart. Metal initialized correctly on node-b's GPU
   (`Apple M4`, ~19GB usable GPU working set).
 - Next: pick a GGUF model to actually test with, point `llama-server` on
-  exo01 at exo02's RPC endpoint (`--rpc 192.168.1.39:50052`), confirm it
-  splits layers across both machines, and benchmark real tok/s.
+  `node-a` at `node-b`'s RPC endpoint (`--rpc <node-b-ip>:50052`), confirm
+  it splits layers across both machines, and benchmark real tok/s.

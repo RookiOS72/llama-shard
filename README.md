@@ -24,8 +24,9 @@ staged approach.
 
 ## Hardware
 
-Two Mac minis (Apple M4, 24GB unified memory each), same LAN, hostnames
-`prf-hays-exo01` / `prf-hays-exo02`. Both already run
+Two Mac minis (Apple M4, 24GB unified memory each) on the same LAN,
+referred to here as `node-a` (runs the orchestrating `llama-server`/
+`llama-cli` process) and `node-b` (runs `rpc-server`). Both already run
 [exo](https://github.com/exo-explore/exo) for MLX-based sharding — this
 project is exploring the llama.cpp/GGUF equivalent.
 
