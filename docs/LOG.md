@@ -183,3 +183,66 @@ change. Next person picking this up should measure that directly (e.g.
 via `openclaw proxy` to inspect the actual assembled request) before
 assuming further skill trimming will help — it likely won't get you far
 on its own.
+
+## Diagnosing repeat slowness: it's slot assignment, not missing caching
+
+Continued the investigation into why *ongoing* messages (not just the
+first one) were still occasionally slow. llama-server's `/slots`
+endpoint plus its own stdout log (`llama-server3.log`) gave a direct,
+measured answer.
+
+- llama-server's automatic prompt caching (`--cache-prompt`, on by
+  default) genuinely works well *when a request lands back on the same
+  slot it used last time*: observed 70-100% prefix reuse across several
+  consecutive same-slot requests in the live log (e.g. one request reused
+  ~25K of its ~30.7K tokens from the prior request on that slot; another
+  reused nearly its entire prompt and finished in ~15s).
+- The problem: there are only 4 slots (`-np` was left at its `-1`/auto
+  default), and openclaw only has **one** real conversation identity
+  today (the "main" agent — heartbeats run inside that same session, per
+  `agents.defaults.heartbeat` in openclaw.json, not a separate one).
+  Despite that, requests were landing on three different slots over time
+  (slot 2, then slot 1, then slot 0) as the prompt's size and shape
+  shifted from openclaw's own context trimming between turns. Each time
+  the automatic prompt-similarity slot picker (`--slot-prompt-similarity`,
+  default threshold 0.10) missed the slot actually holding the relevant
+  cached prefix, that request paid a mostly- or fully-cold reprocess —
+  directly reproduced live: task 1395 was killed mid-prefill at 20,475
+  tokens by openclaw's own timeout, and the retry (task 1408) landed back
+  on the same slot and reused that leftover state (72% reuse, 153.6s for
+  the remaining ~7.7K tokens) — the exact "times out once, retry succeeds
+  via cache" pattern described in the wiring section above, still
+  happening live months (well, hours) later.
+- **Fix: `proxy/slot_pin_proxy.py`**, a small dependency-free Python
+  reverse proxy that sits between openclaw and llama-server. It forwards
+  every request unchanged except for injecting a fixed `"id_slot"` into
+  the JSON body (confirmed via llama-server's own source,
+  `server-context.cpp`, that the OAI-compatible chat-completions path
+  reads `id_slot` from the raw request body exactly like the native
+  `/completion` endpoint does — same code path, just not documented on
+  the OpenAI-compat side). Streams responses back chunk-by-chunk so SSE
+  (`stream: true`) still works. Since there's only one real identity
+  today, v1 pins everything to one fixed slot rather than trying to route
+  by identity — see the module docstring for how to extend it if a second
+  identity shows up later.
+- Verified end-to-end: started the proxy on `127.0.0.1:8090`, confirmed a
+  direct completion request landed on the pinned slot via `/slots`
+  (task/prompt counters updated on exactly that slot, others untouched),
+  then pointed openclaw's `models.providers.llama-shard.baseUrl` at
+  `http://127.0.0.1:8090/v1` (was `:8080` directly) and restarted the
+  `ai.openclaw.gateway` LaunchAgent to pick it up. Ran a real end-to-end
+  test via `openclaw agent -m "..." --json` (no `--deliver`, so it
+  doesn't hit a real channel) to confirm a full real agent turn works
+  through the new path.
+- **Bonus finding from `openclaw doctor` while checking the restart**:
+  the workspace `AGENTS.md` file alone is 26,749 raw chars / 19,182
+  injected chars (28% truncated at the default per-file limit), and total
+  bootstrap injection is 24,194 of a 60,000-char budget (40%). This is
+  concrete, measured evidence for the still-open question from the
+  section above about what's actually filling the ~28K-token system
+  prompt — worth picking up directly next time that's being investigated,
+  rather than re-deriving it.
+- Not yet done: the proxy isn't supervised (same "plain background
+  process" caveat as `llama-server`/`rpc-server` — see README/PLAN); it
+  and the pinned slot number are the natural next candidate for the
+  launchd-service work already on the roadmap.
