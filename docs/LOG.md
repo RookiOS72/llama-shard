@@ -112,3 +112,60 @@
 finish a real request, and performs comparably to exo's own approach.
 Worth deciding next whether/how to move to step 2 (see
 [PLAN.md](PLAN.md)).
+
+## Wiring it into a real assistant (openclaw)
+
+Went straight to a real-world test: pointed `openclaw` (an existing
+agent framework already running on `node-a`) at this `llama-server`
+instance via its OpenAI-compatible endpoint, replacing a broken exo
+config (a different model it was pointed at turned out to use an
+architecture exo doesn't support — unrelated to this project, but it's
+what created the opening to try this).
+
+- Config: added a new model provider with `"api": "openai-completions"`
+  (not `"openai"` — that name isn't accepted) pointed at
+  `http://127.0.0.1:8080/v1`, no real API key needed since it's local.
+- **Confirmed tool-calling works** through llama-server's OpenAI-compatible
+  endpoint for this model — sent a request with a `tools` array, got back
+  a correctly-formatted `tool_calls` response. This mattered because the
+  model's Ollama-specific `RENDERER glimmer`/`PARSER glimmer` template
+  hints aren't something llama.cpp understands, so this wasn't guaranteed
+  to work — it does, likely because llama.cpp handles tool-calling via
+  the model's own embedded GGUF chat template rather than Ollama's
+  separate renderer/parser convention.
+- **Real system prompts are much bigger than expected.** openclaw's full
+  agent system prompt (with its default tool/skill set loaded) came in
+  around 24-30K tokens — nowhere near the small prompts used for the
+  earlier benchmarks in this log. First attempt at `-c 8192` failed
+  outright (`request (30525 tokens) exceeds the available context size`).
+  Bumped to `-c 65536` — this model's KV cache is lean (only 2 KV heads),
+  so the memory cost of a much bigger context is modest.
+- **Found and cleared a genuinely stale, unrelated problem**: an old
+  long-running session on the openclaw side had accumulated ~66K tokens
+  of stale history over many hours (heartbeats, earlier unrelated tests)
+  and was stuck in an `aborted` state. Every new message inherited that
+  entire backlog before even starting, which is why token counts kept
+  climbing between attempts (30K → 80K) independent of anything in this
+  project. Cleared with `openclaw sessions compact <key> --max-lines 10`
+  (hard truncation, no LLM summarization needed — deleting the session
+  outright wasn't allowed since it's a protected "main" session).
+- **First real message timed out, then succeeded on retry.** With a
+  clean ~24.5K-token prompt, prompt processing alone took ~280s at
+  ~80 tok/s, longer than openclaw's default 300s provider timeout —
+  got killed at 79% through, before generating anything. openclaw
+  auto-retried, and because llama-server keeps a prefix cache, the
+  retry reused 85.8% of the already-processed prompt (only ~4K new
+  tokens to process) and completed in ~133s. Total end-to-end for this
+  first message: roughly 7-8 minutes.
+
+**Practical takeaway**: it works, but the "cold start" cost of a large
+tool-equipped system prompt is real on this hardware — the first message
+of a new/idle session will likely time out once and need the automatic
+retry to actually get an answer, adding several minutes. Ongoing
+messages in an already-warm session should be much faster since they
+only reprocess the incremental new tokens, not the whole system prompt
+— but that assumes the prefix cache slot doesn't get evicted by other
+concurrent sessions/cron jobs competing for the same small pool of
+cache slots. Worth deciding whether that tradeoff is acceptable, or
+whether the fix is a smaller/faster model, a trimmed-down tool set, or
+both.
