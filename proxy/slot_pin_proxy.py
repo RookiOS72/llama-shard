@@ -49,6 +49,14 @@ class ProxyHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         sys.stderr.write("[slot-pin-proxy] " + (fmt % args) + "\n")
 
+    def handle_one_request(self):
+        try:
+            super().handle_one_request()
+        except (BrokenPipeError, ConnectionResetError):
+            # Harmless: client closed a keep-alive connection between
+            # requests instead of sending another one.
+            self.close_connection = True
+
     def _forward(self, method: str):
         raw_len = int(self.headers.get("Content-Length", 0) or 0)
         raw_body = self.rfile.read(raw_len) if raw_len else b""
