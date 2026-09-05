@@ -63,3 +63,52 @@
 - Next: pick a GGUF model to actually test with, point `llama-server` on
   `node-a` at `node-b`'s RPC endpoint (`--rpc <node-b-ip>:50052`), confirm
   it splits layers across both machines, and benchmark real tok/s.
+- Pulled `muse-glimmer` via `ollama pull muse-glimmer` (18GB total: a
+  16GB main weights blob + 1.4GB vision/adapter blob). Deliberately chose
+  this model since it's the one that started this whole detour — exo
+  couldn't load it (unsupported architecture), so getting it running here
+  would be a satisfying full-circle test. Located the raw GGUF blob
+  directly in Ollama's own content-addressed blob store
+  (`~/.ollama/models/blobs/sha256-...`) — no need to re-download from
+  elsewhere, and no need to translate the format; Ollama blobs are
+  themselves valid GGUF files (confirmed via magic bytes).
+- **First load attempt did not actually shard.** Started `llama-server`
+  with just `--rpc <node-b-ip>:50052` and no explicit device/split flags.
+  It loaded fine and generated correctly (6.2 tok/s), but `node-b` showed
+  ~0% CPU throughout — the whole model loaded onto `node-a` alone. Since
+  this 16GB model comfortably fits in `node-a`'s own ~19GB Metal budget,
+  llama.cpp's automatic placement logic didn't bother using the remote
+  RPC device at all.
+- Ran `--list-devices` to see how devices enumerate with `--rpc` set:
+  ```
+  MTL0: Apple M4 (18186 MiB, 18185 MiB free)
+  BLAS: Accelerate (0 MiB, 0 MiB free)
+  RPC0: 192.168.1.39:50052 (18186 MiB, 18185 MiB free)
+  RPC1: 192.168.1.39:50052 (0 MiB, 0 MiB free)
+  ```
+  Note the phantom `RPC1` entry reporting 0 MiB for the same endpoint —
+  this is likely what caused the original run's
+  `device RPC1 did not report memory; --fit will not use it` warning and
+  probably confused automatic placement.
+- **Fix: force it explicitly.** Restarted with
+  `--device MTL0,RPC0 --tensor-split 1,1` to name the two real devices
+  directly and split evenly, sidestepping the phantom device entirely.
+  This time `node-b`'s `rpc-server` process memory climbed steadily
+  during load (0 → ~2GB → ~4.5GB → ~6.7GB → ~8.27GB over about 7 minutes
+  total) — real tensor data streaming to it over the LAN, no local copy
+  of the model file needed on `node-b` at all (unlike exo's MLX approach,
+  which required each node to hold its own full copy on disk).
+- **First genuinely distributed generation.** With both machines
+  confirmed active (CPU ticked up on both during generation, not just
+  `node-a`), a test prompt returned successfully:
+  - **4.23 tok/s** generation, **15.5 tok/s** prompt processing
+  - For comparison: exo's own 2-node MLX split earlier this session
+    measured ~4-4.5 tok/s on a similarly-sized model. Roughly the same
+    ballpark — this isn't a magic speed win over exo, but it **is** proof
+    the mechanism works end-to-end on real hardware with a real model,
+    which was the actual goal of step 1.
+
+**Step 1 verdict: proven.** The core trick works, is stable enough to
+finish a real request, and performs comparably to exo's own approach.
+Worth deciding next whether/how to move to step 2 (see
+[PLAN.md](PLAN.md)).
