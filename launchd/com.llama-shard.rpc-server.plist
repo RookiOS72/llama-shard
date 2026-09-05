@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>com.llama-shard.rpc-server</string>
+
+    <key>Comment</key>
+    <string>llama-shard: node-b's ggml-rpc-server, exposes this Mac's GPU as a shard target for node-a's llama-server. LAN only -- see README security note, do not expose beyond the LAN.</string>
+
+    <key>ProgramArguments</key>
+    <array>
+      <string>/Users/brenden/dev/llama.cpp/build/bin/ggml-rpc-server</string>
+      <string>-H</string>
+      <string>0.0.0.0</string>
+      <string>-p</string>
+      <string>50052</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/brenden/dev/llama.cpp</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <key>ExitTimeOut</key>
+    <integer>20</integer>
+
+    <key>StandardInPath</key>
+    <string>/dev/null</string>
+    <key>StandardOutPath</key>
+    <string>/Users/brenden/Library/Logs/llama-shard/rpc-server.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/brenden/Library/Logs/llama-shard/rpc-server.log</string>
+  </dict>
+</plist>

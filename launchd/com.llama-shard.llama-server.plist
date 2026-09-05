@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>com.llama-shard.llama-server</string>
+
+    <key>Comment</key>
+    <string>llama-shard: node-a llama-server, sharded across node-a (Metal) + node-b (RPC)</string>
+
+    <key>ProgramArguments</key>
+    <array>
+      <string>/Users/brenden/dev/llama.cpp/build/bin/llama-server</string>
+      <string>-m</string>
+      <string>/Users/brenden/.ollama/models/blobs/sha256-71b5c9c9abbc2a9e7c13550b6f9fe1f062650117a24490b15a310cbd7de03f8b</string>
+      <string>--rpc</string>
+      <string>192.168.1.39:50052</string>
+      <string>--device</string>
+      <string>MTL0,RPC0</string>
+      <string>--tensor-split</string>
+      <string>1,1</string>
+      <string>--port</string>
+      <string>8080</string>
+      <string>-c</string>
+      <string>65536</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/brenden/dev/llama.cpp</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <key>ExitTimeOut</key>
+    <integer>20</integer>
+
+    <key>StandardInPath</key>
+    <string>/dev/null</string>
+    <key>StandardOutPath</key>
+    <string>/Users/brenden/Library/Logs/llama-shard/llama-server.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/brenden/Library/Logs/llama-shard/llama-server.log</string>
+  </dict>
+</plist>

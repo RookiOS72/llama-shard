@@ -246,3 +246,52 @@ measured answer.
   process" caveat as `llama-server`/`rpc-server` — see README/PLAN); it
   and the pinned slot number are the natural next candidate for the
   launchd-service work already on the roadmap.
+
+## launchd (issue #1): 2 of 3 services done, llama-server blocked
+
+Added `launchd/` with plists for all three processes
+(`com.llama-shard.llama-server`, `com.llama-shard.slot-pin-proxy` on
+node-a, `com.llama-shard.rpc-server` on node-b) plus a small robustness
+fix to the proxy (return 502 instead of a raw traceback when llama-server
+isn't reachable yet, since under launchd it may start before llama-server
+is ready).
+
+- **`slot-pin-proxy` and `rpc-server`: working cleanly under launchd.**
+  Installed as user LaunchAgents (`gui/<uid>` domain), `RunAtLoad` +
+  `KeepAlive`, logs under `~/Library/Logs/llama-shard/`.
+- **`llama-server`: blocked, reverted to a plain manual process for now.**
+  Every launchd-launched attempt aborts near-instantly with
+  `ggml-rpc.cpp:547: Failed to connect to 192.168.1.39:50052`, even
+  though node-b's `rpc-server` is confirmed up and reachable (`nc -z`
+  succeeds from node-a both before and during the failure). Isolated the
+  cause with two tests before giving up on it:
+  - Killed and replaced node-b's `rpc-server` with a completely fresh
+    instance (in case the long-running original was wedged from the
+    earlier abrupt `kill` of its old client) -- same failure, ruling that
+    out.
+  - Ran the *exact* same binary, same args, even with a stripped `env -i`
+    environment (to rule out a missing env var launchd doesn't set) --
+    directly in an interactive shell, and it worked fine, loading the
+    model normally. So it's specifically "spawned by launchd" that
+    fails, not the command itself or the environment.
+  - Checked `~/Library/Application Support/com.apple.TCC/TCC.db` for a
+    Local Network denial (the usual suspect for "works interactively,
+    silently fails headless" on modern macOS) -- no record at all, for
+    either outcome. Doesn't rule out a TCC-adjacent cause, but there's no
+    direct evidence for the classic explanation either.
+  - No third-party firewall found (no Little Snitch/LuLu processes or
+    apps). Didn't get further into `pfctl`/Screen Time content-filtering
+    since that needs `sudo`/GUI access this session doesn't have.
+  - Best remaining guess: some per-process network policy that treats
+    launchd-spawned processes differently from a shell's children (e.g.
+    Screen Time Content & Privacy network restrictions, or an MDM
+    profile) -- keyed by "responsible process" the way several macOS
+    privacy/filtering features are. Untested alternative worth trying
+    next: a **LaunchDaemon** (`/Library/LaunchDaemons`, `system` domain,
+    root, needs `sudo`) instead of a LaunchAgent -- daemon-domain
+    processes sit outside the per-user session policies that would
+    explain this.
+  - Net effect: llama-server is back to being a manual `nohup` process,
+    same as before this issue was opened -- no regression, but the
+    "survives a reboot" goal isn't met for this one process yet. See
+    issue #1 for follow-up.
