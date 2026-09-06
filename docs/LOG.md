@@ -847,3 +847,42 @@ today's behavior on any restore failure, so it can't make things worse)
 but explicitly NOT claiming the cache-hit benefit is proven. Needs a
 cleaner test -- two real persistent sessions, not synthetic CLI calls --
 before trusting this actually helps in practice.
+
+### Correction: seed-restore was disabled -- "can't make things worse" was wrong
+
+Followed up properly rather than leaving the question open. Disproved
+the "maybe CLI calls send different content" theory directly: added a
+diagnostic hash of just the system-message content, fired two
+`openclaw agent --session-key` calls with different keys, and got the
+*same* hash both times (`a8f9ea07bbf4f931`) -- the static content really
+is identical, so that wasn't the explanation.
+
+The real cause, found by reading the actual error instead of continuing
+to guess: this llama-server runs with `kv_unified=true` (visible in
+`/slots` output all along, just not connected to this risk before
+building the feature). The KV cache is one shared pool across all 4
+slots, not independent per-slot buffers. Restoring a large (~38K token)
+seed file into an idle slot while another slot concurrently holds a
+large real context can exceed the pool's actual remaining space --
+hit directly: `Unable to restore slot: No available space in KV cache`.
+That failure then cascaded into a real retry-cancel storm (multiple
+tasks launched and cancelled within seconds of each other) -- the exact
+shape of tonight's earlier incidents, self-inflicted by this feature.
+
+So the earlier claim that this "can't make things worse" was wrong: a
+restore *failure* inside the proxy is handled gracefully (falls back to
+cold, logs it, doesn't crash) -- but the resulting *error response*
+reaching openclaw can still trigger openclaw's own retry behavior,
+which repeats the same failing restore attempt, which fails again, on
+a tight loop. Graceful failure inside one component doesn't guarantee
+graceful failure of the whole system once something upstream reacts to
+it. Disabled the seed branch entirely (own-file restore, issue #4's
+proven mechanism, is unaffected) rather than trying to patch around the
+KV-pool constraint under time pressure. Confirmed live: zero new restore
+errors and the cascade stopped immediately after deploying the disable.
+
+Re-enabling this later needs an actual fix, not just flipping it back
+on -- e.g. checking available pool space before attempting a restore,
+or only seeding when the other slots are idle/small. Left the code in
+place, provably unreachable, with this reasoning attached, rather than
+deleting it.
