@@ -1,3 +1,5 @@
 .DS_Store
 *.log
 models/
+__pycache__/
+*.pyc

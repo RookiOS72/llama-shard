@@ -19,11 +19,13 @@ into a proper app/open-source project.
 
 ## Status
 
-**Step 1 (in progress): prove the core mechanism works.**
-Build llama.cpp with RPC + Metal on two Mac minis, split a model's layers
-across them, confirm it generates text and measure real throughput. No
-app, no UI, no packaging yet — see [docs/PLAN.md](docs/PLAN.md) for the
-staged approach.
+Stages 1-2 (prove the mechanism, make it usable day-to-day) are done —
+muse-glimmer runs sharded across both Macs and is openclaw's primary
+model. Now on **stage 3, phase 1**: a self-organizing agent
+(`agent/`) that figures out for itself whether a node is head or a tail,
+replacing the hand-written per-role launchd plists in `launchd/`. See
+[docs/PLAN.md](docs/PLAN.md) for the staged approach and
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the current design.
 
 ## Hardware
 
