@@ -1,4 +1,9 @@
-# llama-shard
+# Caravan
+
+*(Renamed from "llama-shard" on GitHub. The local directory, launchd service
+labels, log paths, and openclaw provider config still use the original
+`llama-shard` identifiers for now — see [docs/LOG.md](docs/LOG.md) for the
+naming discussion; a full rebrand of those is a separate, not-yet-done step.)*
 
 Experiment: shard a llama.cpp/GGUF model (the engine underneath Ollama) across
 multiple Macs, the way [exo](https://github.com/exo-explore/exo) does for

@@ -3,7 +3,11 @@
 Supervises the three plain background processes this project depends on, so
 they survive a crash or reboot instead of needing to be started by hand.
 See [docs/PLAN.md](../docs/PLAN.md) (stage 2) and
-[GitHub issue #1](https://github.com/RookiOS72/llama-shard/issues/1).
+[GitHub issue #1](https://github.com/RookiOS72/caravan/issues/1).
+
+*(The GitHub repo was renamed `llama-shard` → `caravan`; the plist labels,
+paths, and log directory below still say `llama-shard` pending a fuller
+rebrand.)*
 
 | plist | machine | what |
 |---|---|---|

@@ -35,7 +35,8 @@
   node-a with `--rpc`, load a real GGUF model split across both, and
   benchmark actual tok/s against what we saw with exo/MLX.
 - Created the public GitHub repo:
-  [github.com/RookiOS72/llama-shard](https://github.com/RookiOS72/llama-shard).
+  [github.com/RookiOS72/llama-shard](https://github.com/RookiOS72/llama-shard)
+  (since renamed to [github.com/RookiOS72/caravan](https://github.com/RookiOS72/caravan)).
   `gh` was already installed and authenticated, so no extra setup needed.
 - First build attempt on node-b failed instantly (`nohup: cmake: No such
   file or directory`) — the background SSH command didn't have Homebrew's
@@ -379,5 +380,33 @@ means patching `ggml-rpc.cpp` itself (add a local on-disk tensor cache
 keyed as above, checked before accepting a buffer from the client) rather
 than something buildable purely around the existing binaries the way the
 slot-pin-proxy was. Filed as
-[issue #3](https://github.com/RookiOS72/llama-shard/issues/3) for
+[issue #3](https://github.com/RookiOS72/caravan/issues/3) for
 whenever this is worth picking up.
+
+### Renamed: llama-shard → Caravan
+
+Wanted distance from "Ollama" in the name (the project only ever reads
+Ollama's local blob cache as a convenience -- MIT-licensed, no code
+reuse, so no licensing issue, but naming the project after it invites
+confusion/trademark association it doesn't need). Considered several
+directions (pack-animal metaphor, weaving/structure metaphor, direct
+`ggml`-style technical names, a "distributed llama" pun) and picked
+**Caravan**: llamas' original job was hauling loads across distance in a
+group, which maps cleanly onto distributing an inference workload across
+machines, without being a strained pun. Checked availability first:
+`caravan` is free on GitHub (per-account namespace, so this was never in
+doubt) but already used on PyPI/npm by small, inactive, unrelated
+packages (an AWS SWF framework) -- low real-world confusion risk, but
+worth knowing before ever publishing a package under this name.
+
+Renamed the GitHub repo (`gh repo rename`, keeps issues/stars/history,
+old URLs redirect) and updated the local git remote + doc text/links in
+this commit. Deliberately **not** yet renamed: the local
+`~/dev/llama-shard` directory, the `com.llama-shard.*` launchd labels,
+`~/Library/Logs/llama-shard/`, the `LLAMA_SHARD_*` proxy env vars, or
+openclaw's `models.providers.llama-shard` config key -- all of that is
+live, currently-working infrastructure (including the still-fragile
+llama-server launchd job from issue #1), and touching it wasn't worth
+the risk just to rename something. Whoever does that full rebuild later:
+grep for `llama-shard`/`llama_shard` across this repo, the launchd
+plists (both machines), and `~/.openclaw/openclaw.json`.
