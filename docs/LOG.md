@@ -628,3 +628,55 @@ on node-a.
 Confirmed the live production processes (llama-server, the slot-pin
 proxy) were unaffected throughout -- everything above ran in dry-run
 mode, and test processes were cleaned up on both machines afterward.
+
+### Real usage surfaces a gap the earlier proxy fix didn't cover
+
+Kept using the live setup after the cross-node test and hit the actual
+production version of what the scaffold's cross-node test caught in
+miniature: two *different* sessions (a heartbeat on `agent:main:main`
+and an interactive `openclaw chat` on a fresh `scratch-test` session)
+made concurrent model calls. The earlier "don't steal a busy slot" proxy
+fix (see above) meant they didn't collide/cancel each other -- but they
+did run genuinely concurrently on two different slots, and llama-server's
+RPC-sharded backend doesn't give each one its own throughput. Watched one
+job's speed drop from ~94 tok/s to ~62 tok/s live as a second and third
+started. One turn ended up taking ~12 minutes of prompt processing alone
+before generation even started, then hit the (new, 900s) hard timeout
+almost immediately after -- a real user-visible failure, not just slow.
+
+Fix: a strict FIFO gate in the proxy (`FifoGate`, a ticket-based
+condition-variable queue -- a plain `threading.Lock` doesn't guarantee
+waiters are woken in arrival order, this does) serializing every
+completion request through the proxy. Only one request is ever in flight
+to llama-server at a time; everything else waits in exact arrival order.
+Considered dropping llama-server to a single slot (`-np 1`) instead,
+which would get the same effect via llama-server's own built-in deferred-
+task queue (confirmed in `tools/server/server-queue.h` -- deferred tasks
+are a `std::deque`, popped FIFO) -- rejected because it would collapse
+all sessions onto one shared slot, reintroducing the cache-thrashing
+problem the slot-pinning proxy was originally built to fix. The proxy-
+level gate keeps all 4 slots and their per-session cache stickiness
+intact; it only stops multiple slots from being *actively worked*
+simultaneously.
+
+To clear the stuck in-flight requests from the incident above rather
+than wait them out, restarted the proxy directly -- severing its open
+connections caused llama-server to detect disconnected clients and
+cancel all four in-flight tasks at once (the same "stop: cancel task"
+path seen all night), which conveniently also deployed the new FIFO code
+in the same step. The original `scratch-test` turn had already hit its
+900s hard timeout right as this happened and ended in a terminal error
+(expected fallout of killing it, not a new bug) -- needed a manual resend
+to get a fresh attempt.
+
+Verified the fix directly rather than waiting for a natural collision:
+fired two small raw completions at the proxy 0.3s apart while a real
+heartbeat request was already in flight. Proxy log confirmed strict
+ordering (`waited 25.2s behind 1 queued request(s)`, then
+`waited 49.4s behind 2 queued request(s)`), and timing matched --
+finished 3.5s apart despite starting 0.3s apart, i.e. sequential, not
+concurrent. Unexpected bonus: the second test request landed on the same
+slot the first had just warmed and got a 59/64-token cache hit, purely
+because serialization left that slot idle-and-warm by the time its turn
+came -- something concurrent execution on separate slots would never
+have produced.
