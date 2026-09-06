@@ -86,6 +86,7 @@ import hashlib
 import http.client
 import json
 import os
+import re
 import select
 import socket
 import sys
@@ -170,41 +171,48 @@ class SessionSlotAssigner:
 session_slots = SessionSlotAssigner(N_SLOTS)
 
 
-def session_fingerprint(body: dict) -> str:
-    """Stable per-session key derived from the first non-system message --
-    fixed for a session's lifetime (that message never changes once
-    sent), distinct across sessions, with no cooperation needed from
-    openclaw (no session id is present in the OpenAI-compatible wire
-    format). A session's later turns still fingerprint identically since
-    they resend the same early history each time.
+# openclaw injects a synthetic marker as the first non-system message on
+# every single call, e.g. "[Sun 2026-09-06 10:34 CDT] (session bootstrap)"
+# -- timestamped to the current minute, not the session's real history.
+# Root-caused 2026-09-06: this is why the naive "hash the first
+# non-system message" approach fingerprinted the same real session
+# differently on every call (confirmed live -- three requests, three
+# different fingerprints, three different slots). Skip it and keep
+# looking for the first message that isn't this synthetic wrapper.
+_BOOTSTRAP_MARKER_RE = re.compile(r"^\[.*?\]\s*\(session bootstrap\)\s*$")
 
-    2026-09-06: three separate real requests to what should be the same
-    openclaw session (agent:main:main) fingerprinted to three different
-    slots -- this assumption is wrong or incomplete somehow, not yet
-    root-caused. DEBUG logging added below (temporary, remove once
-    understood) to see exactly what's actually being hashed each time,
-    since guessing from openclaw's source wasn't conclusive."""
+
+def session_fingerprint(body: dict) -> str:
+    """Stable per-session key derived from the first *real* non-system,
+    non-bootstrap-marker message -- fixed for a session's lifetime (that
+    message never changes once sent), distinct across sessions, with no
+    cooperation needed from openclaw (no session id is present in the
+    OpenAI-compatible wire format)."""
     messages = body.get("messages")
     if isinstance(messages, list):
+        skipped = []
         for m in messages:
-            if isinstance(m, dict) and m.get("role") != "system":
-                content = m.get("content", "")
-                if not isinstance(content, str):
-                    content = json.dumps(content, sort_keys=True)
-                fp = hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
-                sys.stderr.write(
-                    f"[slot-pin-proxy][fp-debug] n_messages={len(messages)} "
-                    f"first_non_system_role={m.get('role')!r} "
-                    f"content_len={len(content)} "
-                    f"content_preview={content[:120]!r} "
-                    f"fingerprint={fp}\n"
-                )
-                return fp
-    # No non-system message found (unusual) -- fall back to hashing the
-    # whole body so it's at least stable within one retried request.
+            if not isinstance(m, dict) or m.get("role") == "system":
+                continue
+            content = m.get("content", "")
+            if not isinstance(content, str):
+                content = json.dumps(content, sort_keys=True)
+            if _BOOTSTRAP_MARKER_RE.match(content.strip()):
+                skipped.append(content[:60])
+                continue
+            fp = hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
+            sys.stderr.write(
+                f"[slot-pin-proxy][fp-debug] n_messages={len(messages)} "
+                f"skipped_bootstrap_markers={len(skipped)} "
+                f"used_role={m.get('role')!r} content_len={len(content)} "
+                f"content_preview={content[:120]!r} fingerprint={fp}\n"
+            )
+            return fp
+    # No usable message found (unusual) -- fall back to hashing the whole
+    # body so it's at least stable within one retried request.
     fp = hashlib.sha256(json.dumps(body, sort_keys=True).encode("utf-8")).hexdigest()[:16]
     sys.stderr.write(
-        f"[slot-pin-proxy][fp-debug] no non-system message found, "
+        f"[slot-pin-proxy][fp-debug] no usable non-system message found, "
         f"hashed whole body, fingerprint={fp}\n"
     )
     return fp
