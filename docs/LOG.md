@@ -449,3 +449,65 @@ transfer (`ggml-rpc.cpp:569: Remote RPC server crashed or returned
 malformed response`, `send failed`). Not a bug, just a sequencing
 mistake -- node-b's rpc-server should be quiescent before starting a
 load on node-a.
+
+### The retry cascade, root-caused
+
+The Tailscale-IP restart above got llama-server back up, but the very
+first real turns after it came back kept failing with `LLM request
+timed out` -- not once, but in a self-sustaining loop that ran for
+close to half an hour. Traced it fully:
+
+1. The `agent:main:main` session had grown to ~37k/66k tokens by the
+   time this happened -- normal accumulation plus tonight's own churn
+   (a manual smoke-test turn, several heartbeat attempts). At this
+   hardware's current prompt-processing speed (~65-100 tok/s), a
+   35k-token cold-cache prompt takes 400-600s just to process, before
+   any generation starts.
+2. `agents.defaults.timeoutSeconds` / the `caravan` provider's
+   `timeoutSeconds` were both well under that (480s / 300s). So the
+   *first* attempt at any cold-cache turn was close to guaranteed to
+   get killed by openclaw's own client-side timeout right as it neared
+   completion -- confirmed directly in the logs: one attempt got
+   cancelled at n_tokens=35700/35719 (99.97% through prompt processing,
+   not one token generated yet).
+3. `slot_pin_proxy.py`'s `pick_slot()` forced `id_slot=0` on *every*
+   request unconditionally, with no check for whether slot 0 was
+   already busy. Each retry (or an overlapping heartbeat call) landed
+   on the same busy slot and forced llama-server to cancel whatever was
+   already in flight there -- including attempts that were seconds from
+   finishing.
+4. Each cancelled attempt's partial exchange still got appended to
+   session history, growing the prompt for the *next* attempt, making
+   the next cold reprocess slower still. Self-sustaining: cancel, grow,
+   retry, cancel again.
+
+It did eventually break out on its own (a couple of small, fully-cached
+turns finally completed once the timing happened to line up), but
+leaving it to chance isn't a fix. Three changes, all pushed:
+
+- **`proxy/slot_pin_proxy.py`**: `pick_slot()` now checks `/slots`
+  first. Prefers `PINNED_SLOT` when it's idle (the original cache-reuse
+  behavior); if it's busy, routes to any other idle slot instead of
+  stealing it. Falls back to the old unconditional pin only if the
+  `/slots` check itself fails or every slot is busy -- no worse than
+  before in that one case, strictly better otherwise.
+- **`~/.openclaw/openclaw.json`**: `agents.defaults.timeoutSeconds`,
+  `agents.defaults.heartbeat.timeoutSeconds`, and the `caravan`
+  provider's `timeoutSeconds` all raised from 480/480/300 to 900 --
+  real headroom over the ~600s worst-case cold-processing time measured
+  tonight, so a cold turn gets one real chance to finish instead of a
+  guaranteed kill-and-retry.
+- **Session hygiene**: looked for a config-level fix first --
+  openclaw has a native `agents.defaults.compaction` auto-compaction
+  guard, but it only fires to avoid *overflowing* the context window
+  (65536 tokens here); it has no opinion on a session that's merely
+  large-relative-to-this-hardware's-speed without being close to that
+  ceiling, so it wouldn't have prevented any of this. Added a separate,
+  simple fix for that gap: `ai.openclaw.session-compact.plist`, a new
+  LaunchAgent that runs `openclaw sessions compact "agent:main:main"
+  --agent main --max-lines 10` once daily at 3am (outside the
+  06:00-22:00 heartbeat active hours), so normal accumulation over days
+  can't quietly repeat tonight's runaway growth.
+
+Verified with a manual smoke test after all three landed: clean
+21-second single-attempt success, no retry, `fallbackUsed: false`.
