@@ -774,3 +774,38 @@ during an already-abandoned diagnostic request (intentionally killed for
 testing, so restarting through it cost nothing real). Debug logging left
 in place for now rather than stripped immediately -- cheap insurance
 until the fingerprint fix has survived a few more real sessions.
+
+### Two more real findings from live use: telegram token + TUI cancel doesn't disconnect
+
+Root-caused the recurring `getUpdates conflict` errors flagged since the
+very start of tonight's session (and, per the original handoff, before
+that too). Ruled out the two usual local suspects first rather than
+guess: no webhook set on the bot (confirmed directly via Telegram's own
+`getWebhookInfo` API), and no duplicate openclaw gateway process on
+either machine. Something external was genuinely, persistently
+contending for the same bot token on a steady ~30s cycle -- user
+confirmed a phone has the bot's Telegram chat open (though merely having
+a chat open doesn't poll; the real cause was never conclusively
+identified). Fixed decisively rather than keep hunting: revoked and
+rotated the bot token via @BotFather, updated `openclaw.json`, restarted
+the gateway. Conflict errors stopped immediately and stayed stopped --
+clean ~30s poll cycles since.
+
+Separately: user cancelled an in-flight TUI message and asked what was
+worth doing -- checked, and the underlying request was still running
+server-side, same pattern as the `openclaw agent` CLI finding above but
+now confirmed for the TUI's own cancel action too. "Cancel" at the UI
+layer doesn't appear to close the gateway's own connection to the
+proxy -- it just stops the UI from waiting on/displaying the result,
+while the request keeps consuming a real llama-server slot in the
+background. The disconnect-cancel fix from earlier tonight only fires on
+an actual TCP disconnect, which this isn't, from the proxy's point of
+view -- so it correctly didn't fire here; the gap is one layer up, in
+whatever "cancel" actually does (or doesn't do) inside openclaw itself.
+Freed the slot the same way as always -- restarted the proxy, which
+forces the disconnect and lets llama-server's own cancel-on-disconnect
+handling do its job. Filed as a GitHub issue rather than just noted here,
+since it's a real, likely-recurring cost (a user cancelling a slow
+request should actually free the compute, not just hide it) and isn't
+something we can fix from Caravan's side alone -- it's openclaw's own
+cancel semantics.
