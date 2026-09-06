@@ -22,6 +22,7 @@ Usage:
 import argparse
 import http.client
 import sys
+import time
 from pathlib import Path
 
 import config
@@ -97,6 +98,13 @@ def main() -> int:
         "--apply", action="store_true",
         help="Actually spawn+supervise the local process. Default is dry-run.",
     )
+    parser.add_argument(
+        "--serve-for", type=float, default=0.0, metavar="SECONDS",
+        help="After printing the plan, keep the health endpoint up for this "
+             "many seconds instead of exiting immediately -- lets another "
+             "node's dry run see this one as alive. For testing discovery "
+             "across two machines; --apply implies staying up already.",
+    )
     args = parser.parse_args()
 
     me = identity.load_or_create()
@@ -145,6 +153,10 @@ def main() -> int:
 
     if not args.apply:
         print("[caravan-agent] dry run -- pass --apply to actually spawn this.")
+        if args.serve_for > 0:
+            print(f"[caravan-agent] staying up for {args.serve_for:.0f}s "
+                  "so peers can discover this node...")
+            time.sleep(args.serve_for)
 
     return 0
 
