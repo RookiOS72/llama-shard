@@ -401,12 +401,51 @@ worth knowing before ever publishing a package under this name.
 
 Renamed the GitHub repo (`gh repo rename`, keeps issues/stars/history,
 old URLs redirect) and updated the local git remote + doc text/links in
-this commit. Deliberately **not** yet renamed: the local
-`~/dev/llama-shard` directory, the `com.llama-shard.*` launchd labels,
-`~/Library/Logs/llama-shard/`, the `LLAMA_SHARD_*` proxy env vars, or
-openclaw's `models.providers.llama-shard` config key -- all of that is
-live, currently-working infrastructure (including the still-fragile
-llama-server launchd job from issue #1), and touching it wasn't worth
-the risk just to rename something. Whoever does that full rebuild later:
-grep for `llama-shard`/`llama_shard` across this repo, the launchd
-plists (both machines), and `~/.openclaw/openclaw.json`.
+this commit.
+
+### Full rebrand + accidental fix for issue #1
+
+Followed up by renaming everything else that still said `llama-shard`:
+the local directory (`~/dev/llama-shard` → `~/dev/caravan`), all three
+launchd labels/plist filenames (`com.llama-shard.*` → `com.caravan.*`),
+the proxy's env vars (`LLAMA_SHARD_*` → `CARAVAN_*`), the log directory
+(`~/Library/Logs/caravan/`, old `llama-shard` logs left in place rather
+than moved), and openclaw's config (`models.providers.llama-shard` →
+`caravan`, `agents.defaults.model.primary`, and the matching
+`auth.profiles` entry).
+
+While doing this, found `llama-server` had actually been down for ~7
+hours (crashed earlier at 19:48 on an unrelated RPC error, and being an
+unsupervised manual process, never came back). Restarting it surfaced a
+new, deterministic failure that turned out to be much more interesting
+than the crash itself: `llama-server` could not connect to node-b's RPC
+port (`192.168.1.39:50052`) *at all* when launched from this Claude Code
+CLI session's process tree -- `ggml-rpc.cpp`'s raw `connect()` call
+returned `EHOSTUNREACH` 15/15 times in a row, even though `ping` and `nc
+-z` to the exact same host/port succeeded every time from the same
+shell. Tracked it down to **Tailscale**: this Mac and node-b are both on
+the same tailnet, and for whatever reason (not fully root-caused --
+Tailscale's `RouteAll`/exit-node/netfilter prefs all looked inert, no
+subnet routes are advertised) some process contexts get their LAN-IP
+connections intercepted/dropped while others don't. The fix: address
+node-b by its **Tailscale IP** (`100.90.134.95`) instead of its LAN IP
+(`192.168.1.39`) for the `--rpc` flag. Verified with a raw Python socket
+loop -- 0/15 success on the LAN IP, 3/3 success on the Tailscale IP, from
+the identical process.
+
+This is very likely the real root cause of **issue #1**'s launchd
+connect-failure too -- a launchd-spawned process is exactly the kind of
+different process context this seems to affect, matching the "works
+interactively, fails under launchd" pattern documented there. Updated
+`launchd/com.caravan.llama-server.plist` to use the Tailscale IP; still
+needs a real bootstrap-and-verify pass to close out issue #1 (not done
+yet as of this entry -- see that issue for status).
+
+One process note from tonight: don't restart node-b's `rpc-server` while
+node-a's `llama-server` is mid-load/mid-transfer to it -- did exactly
+that once during this session (bootstrapping the renamed rpc-server
+plist while an old load was streaming tensors to it) and it killed the
+transfer (`ggml-rpc.cpp:569: Remote RPC server crashed or returned
+malformed response`, `send failed`). Not a bug, just a sequencing
+mistake -- node-b's rpc-server should be quiescent before starting a
+load on node-a.

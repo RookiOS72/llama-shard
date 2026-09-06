@@ -3,10 +3,10 @@
 <plist version="1.0">
   <dict>
     <key>Label</key>
-    <string>com.llama-shard.rpc-server</string>
+    <string>com.caravan.rpc-server</string>
 
     <key>Comment</key>
-    <string>llama-shard: node-b's ggml-rpc-server, exposes this Mac's GPU as a shard target for node-a's llama-server. LAN only -- see README security note, do not expose beyond the LAN.</string>
+    <string>Caravan: node-b's ggml-rpc-server, exposes this Mac's GPU as a shard target for node-a's llama-server. LAN only -- see README security note, do not expose beyond the LAN.</string>
 
     <key>ProgramArguments</key>
     <array>
@@ -32,8 +32,8 @@
     <key>StandardInPath</key>
     <string>/dev/null</string>
     <key>StandardOutPath</key>
-    <string>/Users/brenden/Library/Logs/llama-shard/rpc-server.log</string>
+    <string>/Users/brenden/Library/Logs/caravan/rpc-server.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/brenden/Library/Logs/llama-shard/rpc-server.log</string>
+    <string>/Users/brenden/Library/Logs/caravan/rpc-server.log</string>
   </dict>
 </plist>

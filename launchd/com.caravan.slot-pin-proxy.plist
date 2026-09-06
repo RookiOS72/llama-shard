@@ -3,31 +3,31 @@
 <plist version="1.0">
   <dict>
     <key>Label</key>
-    <string>com.llama-shard.slot-pin-proxy</string>
+    <string>com.caravan.slot-pin-proxy</string>
 
     <key>Comment</key>
-    <string>llama-shard: pins openclaw's completion requests to a fixed llama-server slot, see proxy/slot_pin_proxy.py</string>
+    <string>Caravan: pins openclaw's completion requests to a fixed llama-server slot, see proxy/slot_pin_proxy.py</string>
 
     <key>ProgramArguments</key>
     <array>
       <string>/opt/homebrew/bin/python3</string>
-      <string>/Users/brenden/dev/llama-shard/proxy/slot_pin_proxy.py</string>
+      <string>/Users/brenden/dev/caravan/proxy/slot_pin_proxy.py</string>
     </array>
 
     <key>EnvironmentVariables</key>
     <dict>
-      <key>LLAMA_SHARD_UPSTREAM_HOST</key>
+      <key>CARAVAN_UPSTREAM_HOST</key>
       <string>127.0.0.1</string>
-      <key>LLAMA_SHARD_UPSTREAM_PORT</key>
+      <key>CARAVAN_UPSTREAM_PORT</key>
       <string>8080</string>
-      <key>LLAMA_SHARD_PROXY_PORT</key>
+      <key>CARAVAN_PROXY_PORT</key>
       <string>8090</string>
-      <key>LLAMA_SHARD_PINNED_SLOT</key>
+      <key>CARAVAN_PINNED_SLOT</key>
       <string>0</string>
     </dict>
 
     <key>WorkingDirectory</key>
-    <string>/Users/brenden/dev/llama-shard/proxy</string>
+    <string>/Users/brenden/dev/caravan/proxy</string>
 
     <key>RunAtLoad</key>
     <true/>
@@ -41,8 +41,8 @@
     <key>StandardInPath</key>
     <string>/dev/null</string>
     <key>StandardOutPath</key>
-    <string>/Users/brenden/Library/Logs/llama-shard/slot-pin-proxy.log</string>
+    <string>/Users/brenden/Library/Logs/caravan/slot-pin-proxy.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/brenden/Library/Logs/llama-shard/slot-pin-proxy.log</string>
+    <string>/Users/brenden/Library/Logs/caravan/slot-pin-proxy.log</string>
   </dict>
 </plist>

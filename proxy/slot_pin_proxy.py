@@ -29,10 +29,10 @@ import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-UPSTREAM_HOST = os.environ.get("LLAMA_SHARD_UPSTREAM_HOST", "127.0.0.1")
-UPSTREAM_PORT = int(os.environ.get("LLAMA_SHARD_UPSTREAM_PORT", "8080"))
-LISTEN_PORT = int(os.environ.get("LLAMA_SHARD_PROXY_PORT", "8090"))
-PINNED_SLOT = int(os.environ.get("LLAMA_SHARD_PINNED_SLOT", "0"))
+UPSTREAM_HOST = os.environ.get("CARAVAN_UPSTREAM_HOST", "127.0.0.1")
+UPSTREAM_PORT = int(os.environ.get("CARAVAN_UPSTREAM_PORT", "8080"))
+LISTEN_PORT = int(os.environ.get("CARAVAN_PROXY_PORT", "8090"))
+PINNED_SLOT = int(os.environ.get("CARAVAN_PINNED_SLOT", "0"))
 
 # Paths that take a JSON completion-shaped body and accept `id_slot`.
 COMPLETION_PATHS = {"/v1/chat/completions", "/v1/completions", "/completion"}
