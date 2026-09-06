@@ -93,6 +93,7 @@ import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 UPSTREAM_HOST = os.environ.get("CARAVAN_UPSTREAM_HOST", "127.0.0.1")
 UPSTREAM_PORT = int(os.environ.get("CARAVAN_UPSTREAM_PORT", "8080"))
@@ -149,13 +150,58 @@ class SessionSlotAssigner:
     than that can't all stay warm -- the (N_SLOTS+1)th distinct session
     reuses an assignment round-robin and may evict whoever's there. Real
     usage here is nowhere near that ceiling; not solved further than this.
+
+    2026-09-06 update: persisted to disk (STATE_FILE below). Restarting
+    *this proxy process* used to lose the whole mapping even though
+    llama-server itself, and every slot's actual cache, was untouched --
+    confirmed live tonight, a proxy-only restart caused a needless full
+    cold reprocess that a still-warm slot could have served. This is
+    deliberately a tiny fingerprint->slot number mapping, not the KV
+    cache itself -- persisting the actual cache across an llama-server
+    restart is the separate, much bigger issue #4.
     """
 
-    def __init__(self, n_slots: int):
+    def __init__(self, n_slots: int, state_file: "Path | None" = None):
         self._n_slots = n_slots
         self._lock = threading.Lock()
         self._assignments: dict[str, int] = {}
         self._next_slot = 0
+        self._state_file = state_file
+        self._load()
+
+    def _load(self) -> None:
+        if self._state_file is None or not self._state_file.exists():
+            return
+        try:
+            data = json.loads(self._state_file.read_text())
+            assignments = data.get("assignments", {})
+            self._assignments = {
+                k: v for k, v in assignments.items()
+                if isinstance(v, int) and 0 <= v < self._n_slots
+            }
+            self._next_slot = int(data.get("next_slot", 0)) % self._n_slots
+            sys.stderr.write(
+                f"[slot-pin-proxy] restored {len(self._assignments)} session->slot "
+                f"assignment(s) from {self._state_file}\n"
+            )
+        except (OSError, ValueError, json.JSONDecodeError) as e:
+            # Corrupt or unreadable -- fine, just start fresh rather than
+            # crash the proxy over a cache of a cache.
+            sys.stderr.write(f"[slot-pin-proxy] could not restore slot assignments: {e}\n")
+
+    def _save(self) -> None:
+        if self._state_file is None:
+            return
+        try:
+            self._state_file.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._state_file.with_suffix(".tmp")
+            tmp.write_text(json.dumps({
+                "assignments": self._assignments,
+                "next_slot": self._next_slot,
+            }))
+            tmp.replace(self._state_file)  # atomic on the same filesystem
+        except OSError as e:
+            sys.stderr.write(f"[slot-pin-proxy] could not persist slot assignments: {e}\n")
 
     def slot_for(self, fingerprint: str) -> int:
         with self._lock:
@@ -165,10 +211,15 @@ class SessionSlotAssigner:
             slot = self._next_slot % self._n_slots
             self._next_slot += 1
             self._assignments[fingerprint] = slot
+            self._save()
             return slot
 
 
-session_slots = SessionSlotAssigner(N_SLOTS)
+STATE_FILE = Path(os.environ.get(
+    "CARAVAN_PROXY_STATE_FILE",
+    str(Path.home() / ".caravan" / "proxy" / "session_slots.json"),
+))
+session_slots = SessionSlotAssigner(N_SLOTS, STATE_FILE)
 
 
 # openclaw injects a synthetic marker as the first non-system message on
