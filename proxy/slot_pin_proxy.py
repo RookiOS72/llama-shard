@@ -241,6 +241,20 @@ def session_fingerprint(body: dict) -> str:
     OpenAI-compatible wire format)."""
     messages = body.get("messages")
     if isinstance(messages, list):
+        # TEMP diagnostic (2026-09-06): testing whether different
+        # openclaw invocation paths (CLI one-shot vs real session) send
+        # identical static system-prompt content -- see docs/LOG.md,
+        # "Seed caching... benefit not yet verified".
+        system_texts = [
+            m.get("content", "") for m in messages
+            if isinstance(m, dict) and m.get("role") == "system"
+        ]
+        system_blob = "".join(t if isinstance(t, str) else json.dumps(t, sort_keys=True) for t in system_texts)
+        system_hash = hashlib.sha256(system_blob.encode("utf-8")).hexdigest()[:16]
+        sys.stderr.write(
+            f"[slot-pin-proxy][sys-debug] n_system_msgs={len(system_texts)} "
+            f"system_len={len(system_blob)} system_hash={system_hash}\n"
+        )
         skipped = []
         for m in messages:
             if not isinstance(m, dict) or m.get("role") == "system":
@@ -346,16 +360,24 @@ def maybe_restore_slot(slot_id: int, fingerprint: str) -> None:
     case after the first request) doesn't pay a disk round-trip on every
     single turn -- only right after a restart, when it matters.
 
-    2026-09-06 addition: a session with *no* saved file of its own (a
-    genuinely new session) falls back to restoring the most recently
-    saved *other* session's file instead of starting fully cold. This
-    works because the bulk of any prompt here is the shared static
-    prefix (tool schemas + AGENTS.md) -- identical across every session
-    -- and llama-server's own prefix matching only reuses whatever
-    actually matches the incoming request, safely ignoring the rest (the
-    old session's own trailing conversation) if it doesn't. No synthetic
-    request or chat-template guesswork needed: this reuses a real,
-    already-proven-good cache file as a seed. See docs/LOG.md."""
+    2026-09-06 addition, DISABLED same day: tried seeding a session with
+    no saved file of its own from the most recently saved *other*
+    session's file, on the theory that llama-server's prefix matching
+    would safely reuse whatever actually matches (the shared static
+    prefix) and ignore the rest. Confirmed live this breaks: llama-server
+    here runs with kv_unified=true, meaning the KV cache is one shared
+    pool across all N_SLOTS, not independent per-slot buffers. Restoring
+    a large (~38K token) seed into an idle slot while another slot is
+    concurrently holding a large real context can exceed the pool's
+    actual available space -- hit directly: "Unable to restore slot: No
+    available space in KV cache", which then cascaded into a real
+    retry-cancel storm, actively worse than doing nothing. Disabled by
+    always skipping the seed branch below; own-file restore (the
+    issue #4 mechanism, proven safe) is unaffected. See docs/LOG.md
+    before ever re-enabling this -- needs a real fix (e.g. checking
+    available pool space first, or only seeding when other slots are
+    idle), not just turning it back on.
+    """
     with _restore_lock:
         if fingerprint in _restored_this_run:
             return
@@ -366,6 +388,7 @@ def maybe_restore_slot(slot_id: int, fingerprint: str) -> None:
         filename = _slot_save_filename(fingerprint)
         seed = False
     else:
+        return  # seed fallback disabled -- see docstring above
         with _last_saved_lock:
             seed_fingerprint = _last_saved_fingerprint
         seed_path = SLOT_SAVE_DIR / _slot_save_filename(seed_fingerprint) if seed_fingerprint else None
