@@ -716,3 +716,61 @@ specifically to hold the *full* model file (metadata/tokenizer/
 orchestration), which exo's pipeline-parallel design has no equivalent
 requirement for -- no exo node ever needs full-model knowledge. That's
 a real, inherent difference in this backend, not a design win.
+
+### Two real fixes to the proxy, root-caused live against a real session
+
+Went back to real usage after the last round of fixes: user sent "howdy"
+to `main`, then "Hey you!", then a follow-up -- three real messages, each
+taking ~11 minutes, each a full cold reprocess. Per-session pinning
+(landed a few commits back) wasn't actually working. Two separate real
+bugs, found by testing rather than continuing to reason from source:
+
+**Bug 1: abandoned requests kept running for nobody.** User asked
+directly: is there a way to cancel an ollama/llama-server request once
+openclaw itself has given up on it? Checked -- no, there wasn't. A
+request that hit openclaw's 900s timeout kept processing server-side for
+minutes afterward, still holding both an llama-server slot and the FIFO
+gate, delaying every real request queued behind it. llama-server already
+has clean cancel-on-disconnect handling (confirmed all night, e.g.
+whenever the proxy itself restarted mid-request) -- the gap was that our
+proxy never told it the client had left. Added `ProxyHandler._client_gone()`:
+polls the client connection with a non-blocking `MSG_PEEK` while waiting
+on a slow upstream and while streaming; the instant the client's gone,
+shuts down the proxy's own upstream connection, which trips llama-server's
+existing cancel path. Tested in isolation first (a dummy slow-upstream
+server + a synthetic client that disconnects mid-wait) before ever
+touching the live proxy -- confirmed the disconnect propagates, and
+confirmed the normal successful path is untouched.
+
+Tried to verify this live too, by killing the CLI process behind an
+`openclaw agent` call mid-flight -- inconclusive, and worth remembering
+why: `openclaw agent` is a thin client that hands the request to the
+already-running, persistent gateway service and waits for the result:
+killing the CLI kills the thing waiting to *print* the answer, not the
+gateway's own connection to the proxy, which is the real client from the
+proxy's point of view. The isolated unit test remains the real evidence
+this works; a true live test would need the gateway itself to give up,
+not the CLI wrapper around it.
+
+**Bug 2: per-session pinning was fingerprinting the wrong thing.** Added
+temporary debug logging (message count, first-non-system-message
+role/content preview, resulting fingerprint) rather than keep guessing
+from openclaw's minified source, and the very next real request revealed
+it immediately: the "first non-system message" `session_fingerprint()`
+was hashing wasn't a real historical message at all -- openclaw injects a
+synthetic marker at that position on *every single call*,
+`"[Sun 2026-09-06 10:34 CDT] (session bootstrap)"`, timestamped to the
+current minute. Different fingerprint every call, different slot every
+call, full cache miss every call -- exactly the symptom seen live (three
+requests to the same session, three different slots). Fixed by skipping
+any message matching that bootstrap-marker pattern and using the first
+message that's actually part of the real conversation. Verified against
+the real captured pattern (varying timestamp, growing trailing history)
+before deploying, not just assumed fixed.
+
+Both changes deployed by restarting the proxy between real requests, not
+mid-flight -- checked `/slots` empty first each time, and once cleanly
+during an already-abandoned diagnostic request (intentionally killed for
+testing, so restarting through it cost nothing real). Debug logging left
+in place for now rather than stripped immediately -- cheap insurance
+until the fingerprint fix has survived a few more real sessions.
