@@ -17,7 +17,21 @@ machine is "the server."
 
 ## Why this isn't just "build what exo does"
 
-llama.cpp's RPC backend has a structural asymmetry that MLX/exo doesn't:
+**Correction (2026-09-06, later that night):** earlier LOG.md entries and
+an earlier version of this section claimed exo requires every node to
+hold a full local copy of the model. That was wrong -- never verified,
+carried forward from an earlier session's assumption. Checked directly:
+exo uses pipeline parallelism and each node downloads only the layer
+range it's assigned (its "Placement Engine" decides the split, each
+node's "DownloadCoordinator" fetches just its own shard) -- see
+[exo's README](https://github.com/exo-explore/exo/blob/main/README.md).
+That's the same shard-only-storage property this project's own planned
+Phase 2 (below) is aiming for, not something Caravan does instead of
+exo. Corrected the reasoning below; see LOG.md for the fuller writeup of
+what was wrong and why.
+
+llama.cpp's RPC backend still has a real structural asymmetry, just not
+the one originally claimed here:
 
 - **Head** (`llama-server`) needs the *full model file* on local disk (to
   read metadata/tokenizer and do orchestration) and does the actual
@@ -26,11 +40,14 @@ llama.cpp's RPC backend has a structural asymmetry that MLX/exo doesn't:
   compute backend that executes whatever tensors arrive over the wire and
   forgets them when the process exits.
 
-exo's model requires every node to hold a full local copy, even nodes
-only ever computing a slice — see the "Why model load takes 5-7 minutes"
-and shard-cache entries in LOG.md. Caravan was deliberately built to avoid
-that N-way disk duplication, so "any node can become head" can't be
-bought the same way exo buys it (everyone has everything). Instead: head
+The genuine difference from exo isn't storage footprint -- it's that
+exo's pipeline-parallel design has no node that needs *full* model
+knowledge; every node, including whichever one starts the pipeline, only
+ever needs its own shard. llama.cpp's RPC backend isn't built that way:
+the head specifically needs the complete model file present, even though
+it only computes some of the layers itself. That's a real, inherent
+constraint of this backend, not a duplication cost Caravan is avoiding by
+being cleverer than exo. Practical effect is the same either way: head
 role follows wherever the full model already lives.
 
 ## Role determination — self-declared, not elected

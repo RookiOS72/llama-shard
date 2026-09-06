@@ -47,7 +47,27 @@ concurrent neighbor. This does NOT reintroduce the cache-thrashing
 problem `pick_slot` above was built to avoid: cache lives on the slot,
 not on request timing, and slots stay assigned to whichever session last
 used them regardless of serialization -- see docs/LOG.md.
+
+2026-09-06 update #3: "whichever session last used them" turned out to
+be the weak point -- there was only ever one shared PINNED_SLOT for
+*every* session, so any two distinct sessions (e.g. the heartbeat's
+`agent:main:main` and an interactive `scratch-test`) still evicted each
+other's cache whenever they happened to both want slot 0, exactly the
+thrashing the pinning design was meant to prevent. Confirmed live: a
+`main` turn came in right after `scratch-test` retries had evicted its
+cache, forcing a full ~40K-token cold reprocess that then blew through
+the 900s timeout waiting in the FIFO queue behind other traffic. Fixed
+by making the preferred slot per-session instead of global --
+`SessionSlotAssigner` derives a stable fingerprint per session (hash of
+its first non-system message, fixed for that session's life, no
+cooperation needed from openclaw) and assigns it its own slot,
+round-robin, on first sight. Distinct sessions now get distinct slots and
+can't evict each other at all, up to N_SLOTS concurrently-active sessions
+-- beyond that hard ceiling something has to give, which is a real
+resource limit (each slot reserves its own chunk of context memory), not
+a bug to chase further. See docs/LOG.md.
 """
+import hashlib
 import http.client
 import json
 import os
@@ -59,7 +79,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 UPSTREAM_HOST = os.environ.get("CARAVAN_UPSTREAM_HOST", "127.0.0.1")
 UPSTREAM_PORT = int(os.environ.get("CARAVAN_UPSTREAM_PORT", "8080"))
 LISTEN_PORT = int(os.environ.get("CARAVAN_PROXY_PORT", "8090"))
-PINNED_SLOT = int(os.environ.get("CARAVAN_PINNED_SLOT", "0"))
+N_SLOTS = int(os.environ.get("CARAVAN_N_SLOTS", "4"))
 
 # Paths that take a JSON completion-shaped body and accept `id_slot`.
 COMPLETION_PATHS = {"/v1/chat/completions", "/v1/completions", "/completion"}
@@ -101,9 +121,63 @@ class FifoGate:
 completion_fifo = FifoGate()
 
 
-def pick_slot(_body: dict) -> int:
-    """Prefer PINNED_SLOT for cache reuse, but don't steal it from an
-    in-flight request -- route to any idle slot instead when it's busy."""
+class SessionSlotAssigner:
+    """Maps a stable per-session fingerprint to a dedicated slot, assigned
+    round-robin the first time each session is seen -- so distinct
+    sessions keep their own cache instead of evicting each other via a
+    single shared preferred slot. See module docstring, update #3.
+
+    With only N_SLOTS physical slots, more concurrently-active sessions
+    than that can't all stay warm -- the (N_SLOTS+1)th distinct session
+    reuses an assignment round-robin and may evict whoever's there. Real
+    usage here is nowhere near that ceiling; not solved further than this.
+    """
+
+    def __init__(self, n_slots: int):
+        self._n_slots = n_slots
+        self._lock = threading.Lock()
+        self._assignments: dict[str, int] = {}
+        self._next_slot = 0
+
+    def slot_for(self, fingerprint: str) -> int:
+        with self._lock:
+            slot = self._assignments.get(fingerprint)
+            if slot is not None:
+                return slot
+            slot = self._next_slot % self._n_slots
+            self._next_slot += 1
+            self._assignments[fingerprint] = slot
+            return slot
+
+
+session_slots = SessionSlotAssigner(N_SLOTS)
+
+
+def session_fingerprint(body: dict) -> str:
+    """Stable per-session key derived from the first non-system message --
+    fixed for a session's lifetime (that message never changes once
+    sent), distinct across sessions, with no cooperation needed from
+    openclaw (no session id is present in the OpenAI-compatible wire
+    format). A session's later turns still fingerprint identically since
+    they resend the same early history each time."""
+    messages = body.get("messages")
+    if isinstance(messages, list):
+        for m in messages:
+            if isinstance(m, dict) and m.get("role") != "system":
+                content = m.get("content", "")
+                if not isinstance(content, str):
+                    content = json.dumps(content, sort_keys=True)
+                return hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
+    # No non-system message found (unusual) -- fall back to hashing the
+    # whole body so it's at least stable within one retried request.
+    return hashlib.sha256(json.dumps(body, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+
+
+def pick_slot(body: dict) -> int:
+    """Prefer this session's assigned slot for cache reuse, but don't
+    steal a busy slot from an in-flight request -- route to any other
+    idle slot instead."""
+    preferred = session_slots.slot_for(session_fingerprint(body))
     try:
         conn = http.client.HTTPConnection(UPSTREAM_HOST, UPSTREAM_PORT, timeout=2)
         conn.request("GET", "/slots")
@@ -111,16 +185,16 @@ def pick_slot(_body: dict) -> int:
         slots = json.loads(resp.read())
         conn.close()
     except Exception:
-        return PINNED_SLOT
+        return preferred
 
     by_id = {s.get("id"): s for s in slots if isinstance(s, dict)}
-    pinned = by_id.get(PINNED_SLOT)
+    pinned = by_id.get(preferred)
     if pinned is not None and not pinned.get("is_processing"):
-        return PINNED_SLOT
+        return preferred
     for s in slots:
         if isinstance(s, dict) and not s.get("is_processing"):
-            return s.get("id", PINNED_SLOT)
-    return PINNED_SLOT
+            return s.get("id", preferred)
+    return preferred
 
 
 class ProxyHandler(BaseHTTPRequestHandler):
@@ -236,7 +310,7 @@ def main():
     print(
         f"[slot-pin-proxy] listening on 127.0.0.1:{LISTEN_PORT}, "
         f"forwarding to {UPSTREAM_HOST}:{UPSTREAM_PORT}, "
-        f"pinning all completions to id_slot={PINNED_SLOT}"
+        f"pinning completions per-session across {N_SLOTS} slot(s), FIFO-serialized"
     )
     try:
         server.serve_forever()

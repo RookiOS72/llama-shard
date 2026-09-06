@@ -680,3 +680,39 @@ slot the first had just warmed and got a 59/64-token cache hit, purely
 because serialization left that slot idle-and-warm by the time its turn
 came -- something concurrent execution on separate slots would never
 have produced.
+
+### Correction: exo does not require a full model copy per node
+
+Every earlier entry in this log that describes exo's approach as
+requiring "a full copy on disk" per node (the "Wiring it into a real
+assistant" entry, the original shard-cache design entry, and the
+self-organizing-agent design session above) is **wrong**. That claim was
+never actually verified -- it was carried forward from an earlier
+session's assumption and repeated without checking. Left the entries
+above as-written since they're a record of what was believed and reasoned
+from at the time; this entry is the correction, not an edit to them.
+
+User asked directly tonight: exo appeared to be downloading only half the
+model per node on a two-node setup, and wanted to know if that was real
+or just appearances. Checked via web search rather than continuing to
+assume either way: it's real. exo uses pipeline parallelism -- a model's
+layers get split into per-node ranges by its Placement Engine, and each
+node's DownloadCoordinator fetches only its own assigned range, never the
+full model. Source: [exo's README](https://github.com/exo-explore/exo/blob/main/README.md),
+[DeepWiki's exo overview](https://deepwiki.com/exo-explore/exo).
+
+What this actually changes: issue #3 / Phase 2 (shard-scoped cache on
+node-b) was framed as Caravan doing something smarter than exo --
+avoiding "N-way duplication" exo supposedly forces. That framing is
+gone; exo already has shard-only storage. The design itself doesn't
+change (node-b caching only its assigned tensor range under a
+content-addressed key is still the right target), but the motivation
+does: this isn't Caravan improving on exo, it's Caravan catching up to
+a pattern exo already proved out. Corrected the equivalent claim in
+`docs/ARCHITECTURE.md` directly (that doc is meant to stay accurate in
+place, unlike this log). The one difference from exo that does still
+hold, on inspection: llama.cpp's RPC backend requires its head node
+specifically to hold the *full* model file (metadata/tokenizer/
+orchestration), which exo's pipeline-parallel design has no equivalent
+requirement for -- no exo node ever needs full-model knowledge. That's
+a real, inherent difference in this backend, not a design win.
