@@ -809,3 +809,41 @@ since it's a real, likely-recurring cost (a user cancelling a slow
 request should actually free the compute, not just hide it) and isn't
 something we can fix from Caravan's side alone -- it's openclaw's own
 cancel semantics.
+
+### Seed caching for brand-new sessions -- mechanism proven, benefit not yet verified
+
+Extended issue #4's save/restore to also help a session with no cache of
+its own: instead of starting fully cold, fall back to restoring the most
+recently saved *other* session's file as a seed, on the theory that the
+bulk of any prompt here is the shared static prefix (tool schemas +
+AGENTS.md), and llama-server's own prefix matching only reuses whatever
+actually matches, safely ignoring the rest if it doesn't -- no synthetic
+request or chat-template guesswork needed, just reusing a real file.
+
+Found and fixed a real bug testing this: the in-memory "last saved
+fingerprint" tracker doesn't survive a proxy restart, so it was empty
+immediately after deploying this code even though a real, already-proven
+save file existed on disk from before the restart. Fixed by falling back
+to scanning `SLOT_SAVE_DIR` for the most recently modified `.bin` file
+when the in-memory tracker is empty, rather than only trusting in-process
+state.
+
+With that fixed, the restore call itself does fire and succeed (confirmed
+in the log: `restored slot 2 ... (seed from bfb2f0a32a1923d7.bin)`), but
+two live tests using `openclaw agent --session-key` one-shot CLI calls
+showed no measurable cache-hit benefit -- both ground through a full cold
+reprocess at the normal pace (~15 min total) despite the seed restore
+succeeding. Best-supported theory, not confirmed: CLI-invoked one-shot
+calls may assemble the system prompt with different content than a real
+persistent chat session does, beyond just the bootstrap-marker timestamp
+already handled -- meaning the two test sessions likely didn't actually
+share identical static-prefix content with each other, so there was
+nothing for the seed to usefully match against. That's a plausible
+testing-methodology gap, not confirmed evidence the mechanism doesn't
+work for real sessions.
+
+Committing the mechanism as-is (it's strictly additive and falls back to
+today's behavior on any restore failure, so it can't make things worse)
+but explicitly NOT claiming the cache-hit benefit is proven. Needs a
+cleaner test -- two real persistent sessions, not synthetic CLI calls --
+before trusting this actually helps in practice.

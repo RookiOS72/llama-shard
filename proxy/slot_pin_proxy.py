@@ -334,28 +334,69 @@ def _post_json_to_upstream(path: str, body: dict, timeout: float):
         return None
 
 
+_last_saved_fingerprint: str = ""
+_last_saved_lock = threading.Lock()
+
+
 def maybe_restore_slot(slot_id: int, fingerprint: str) -> None:
     """If this fingerprint has a saved cache on disk and we haven't
     already tried restoring it in this proxy process's lifetime, restore
     it into slot_id before the real request uses it. Once-per-fingerprint
     guard exists so a session that's already warm in memory (the common
     case after the first request) doesn't pay a disk round-trip on every
-    single turn -- only right after a restart, when it matters."""
+    single turn -- only right after a restart, when it matters.
+
+    2026-09-06 addition: a session with *no* saved file of its own (a
+    genuinely new session) falls back to restoring the most recently
+    saved *other* session's file instead of starting fully cold. This
+    works because the bulk of any prompt here is the shared static
+    prefix (tool schemas + AGENTS.md) -- identical across every session
+    -- and llama-server's own prefix matching only reuses whatever
+    actually matches the incoming request, safely ignoring the rest (the
+    old session's own trailing conversation) if it doesn't. No synthetic
+    request or chat-template guesswork needed: this reuses a real,
+    already-proven-good cache file as a seed. See docs/LOG.md."""
     with _restore_lock:
         if fingerprint in _restored_this_run:
             return
         _restored_this_run.add(fingerprint)
-    save_path = SLOT_SAVE_DIR / _slot_save_filename(fingerprint)
-    if not save_path.exists():
-        return
+
+    own_path = SLOT_SAVE_DIR / _slot_save_filename(fingerprint)
+    if own_path.exists():
+        filename = _slot_save_filename(fingerprint)
+        seed = False
+    else:
+        with _last_saved_lock:
+            seed_fingerprint = _last_saved_fingerprint
+        seed_path = SLOT_SAVE_DIR / _slot_save_filename(seed_fingerprint) if seed_fingerprint else None
+        if not seed_fingerprint or not seed_path.exists():
+            # _last_saved_fingerprint is pure in-memory and doesn't
+            # survive a proxy restart -- confirmed live: it was empty
+            # right after deploying this code even though a real,
+            # already-proven-good save file existed on disk from before
+            # the restart. Fall back to whatever's actually on disk
+            # (most recently modified .bin) rather than only trusting
+            # in-process state.
+            candidates = sorted(
+                (p for p in SLOT_SAVE_DIR.glob("*.bin") if p.stem != fingerprint),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            if not candidates:
+                return
+            seed_path = candidates[0]
+        filename = seed_path.name
+        seed = True
+
     result = _post_json_to_upstream(
         f"/slots/{slot_id}?action=restore",
-        {"filename": _slot_save_filename(fingerprint)},
+        {"filename": filename},
         timeout=120.0,
     )
     if result is not None:
+        kind = f"seed from {filename}" if seed else "own cache"
         sys.stderr.write(
-            f"[slot-pin-proxy] restored slot {slot_id} from disk for fingerprint {fingerprint}\n"
+            f"[slot-pin-proxy] restored slot {slot_id} from disk for fingerprint {fingerprint} ({kind})\n"
         )
     else:
         sys.stderr.write(
@@ -375,6 +416,9 @@ def save_slot(slot_id: int, fingerprint: str) -> None:
     )
     if result is not None:
         sys.stderr.write(f"[slot-pin-proxy] saved slot {slot_id} to disk for fingerprint {fingerprint}\n")
+        with _last_saved_lock:
+            global _last_saved_fingerprint
+            _last_saved_fingerprint = fingerprint
     else:
         sys.stderr.write(f"[slot-pin-proxy] save failed for slot {slot_id}, fingerprint {fingerprint}\n")
 
