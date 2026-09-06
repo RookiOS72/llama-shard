@@ -3,23 +3,29 @@
 A staged approach, each stage only starting once the previous one proves
 worthwhile:
 
-1. **Prove the mechanism.** Build llama.cpp with `GGML_RPC=ON` and
-   `GGML_METAL=ON` on both machines, run `rpc-server` on one, point
-   `llama-server`/`llama-cli` at it from the other with `--rpc`, load a
-   real model split across both, and benchmark actual tokens/sec. If this
-   isn't reasonably fast or reasonably stable, there's no point going
-   further.
-2. **Make it usable day-to-day.** If step 1 looks good, wrap it in
-   something more convenient than two manually-started terminal processes —
-   a small launcher/config, maybe a systemd/launchd-style service, pointed
-   at from openclaw (or whatever's consuming it) via an OpenAI- or
-   Ollama-compatible endpoint.
-3. **Only then, consider the bigger picture.** Dashboard, auto peer
-   discovery, packaging, calling it an actual open-source project for
-   other people to use. This is a much bigger scope than 1-2 and isn't
-   worth starting until 1-2 have proven the idea is sound.
+1. ~~**Prove the mechanism.**~~ **Done.** Built llama.cpp with
+   `GGML_RPC=ON` and `GGML_METAL=ON` on both machines, ran `rpc-server` on
+   one, pointed `llama-server` at it from the other with `--rpc`, loaded
+   muse-glimmer split across both. It works and is stable enough for real
+   use — see `docs/LOG.md` for throughput numbers and the rough edges
+   found along the way.
+2. ~~**Make it usable day-to-day.**~~ **Done, then some.** Wired into
+   openclaw as its primary model via an OpenAI-compatible endpoint, added
+   a slot-pinning reverse proxy to fix cache-losing slot hops, put two of
+   the three processes under launchd supervision, and root-caused/fixed a
+   real production incident (a multi-hour retry cascade from session
+   bloat + a proxy bug + too-tight timeouts). See `docs/LOG.md` for all of
+   it.
+3. **Now: the self-organizing app.** A single agent, installed
+   identically on every machine, that figures out for itself whether it's
+   head or a tail — no more hand-edited per-role plists or manually-picked
+   IPs. Split into two phases (orchestration/robustness, then a shard
+   cache) — full design in
+   [`docs/ARCHITECTURE.md`](ARCHITECTURE.md), worked out in the
+   2026-09-06 design session logged in `docs/LOG.md`.
 
-We are currently on **stage 1**.
+We are currently starting **stage 3, phase 1** (the orchestration/robustness
+agent — see ARCHITECTURE.md).
 
 ## Known risks going in
 

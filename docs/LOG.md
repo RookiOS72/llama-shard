@@ -511,3 +511,60 @@ leaving it to chance isn't a fix. Three changes, all pushed:
 
 Verified with a manual smoke test after all three landed: clean
 21-second single-attempt success, no retry, `fallbackUsed: false`.
+
+### Design session: the self-organizing Caravan agent
+
+With the operational fire out, moved on to a real design conversation
+about evolving Caravan toward what it was named for -- one thing hauling
+a load across machines, not two hand-wired scripts. Landed on a full
+design; the prescriptive reference now lives in
+[docs/ARCHITECTURE.md](ARCHITECTURE.md) and gets updated in place as the
+design evolves. This entry is the narrative of how we got there.
+
+Started from "I want one app installed on every node that figures out
+who's head and who's tail, like exo." First correction needed: llama.cpp's
+RPC backend isn't symmetric the way MLX/exo is -- `llama-server` (head)
+needs the full model file locally, `rpc-server` (tail) needs nothing
+stored at all. exo buys its symmetry by giving every node a full local
+copy (the N-way duplication Caravan was built to avoid, per the
+shard-cache issue). Initially over-framed this as a binary choice
+(lightweight tail-only subset vs. full exo-style duplication) -- wrong;
+those are actually separate axes. The real resolution, worked out over a
+few rounds: head follows wherever the full model already lives, and tails
+only ever cache their own shard, never the whole model.
+
+Next wrong turn: proposed "whichever node receives the request becomes
+head" as if it needed to be dynamic/negotiated. Corrected once the actual
+usage pattern was stated plainly -- there's realistically one Ollama
+instance across the cluster (wherever openclaw's gateway points), so
+head is *always* that machine in practice, and that's fine. This
+simplified the whole role mechanism from something resembling leader
+election down to pure self-declaration: a node checks its own local
+Ollama store; has the model, it's head; doesn't, it's a tail candidate.
+No voting, no negotiation, no split-brain to design around.
+
+Also debated sequencing the shard-cache patch (issue #3) after Thursday's
+incoming USB4/Thunderbolt cable, reasoning the cache matters less once
+transfers are fast over a direct link. Pushed back on directly: exo is
+useful without a fast interconnect, and Caravan should be too -- the
+cable is a bonus, not a substitute for the software actually being good.
+Corrected the reasoning: it's not "cache less important because of the
+cable," it's "orchestration first because a `ggml-rpc.cpp` patch should
+land on a stable base, not a manually-launched moving target." Both
+phases stay fully committed regardless of Thursday.
+
+Landed on hybrid discovery (LAN mDNS + Tailscale-when-available,
+preferring Tailscale IPs given tonight's `EHOSTUNREACH` findings), Python
+for phase 1 (fast iteration while the design was still visibly moving --
+it changed more than once in this same conversation), and a compiled
+language deferred to a later, distinct milestone rather than decided now.
+Explicit call from the user on that last point: don't design the Python
+code to be "portable" -- just keep archiving discoveries and reasoning in
+GitHub (issues + this log) generously, and let *that* be the bridge to a
+future port, not the code itself. Also considered and ruled out Ruby/Rails
+-- Ruby is interpreted (a peer to Python, not a compiled option) and
+Rails is a web-app framework with no fit for a networked daemon that has
+no database or view layer.
+
+Full detail, the two-phase build split, and the open questions this left
+unresolved are in ARCHITECTURE.md, not repeated here.
