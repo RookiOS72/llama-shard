@@ -8,6 +8,75 @@ multiple Macs, the way [exo](https://github.com/exo-explore/exo) does for
 MLX — but for the much larger llama.cpp/GGUF ecosystem instead of
 Apple-Silicon-only MLX.
 
+## Usage
+
+Three processes, two machines, all supervised by launchd (`RunAtLoad` +
+`KeepAlive` — they start automatically on login/reboot and restart
+themselves on a crash, no manual intervention needed day to day):
+
+| what | machine | label |
+|---|---|---|
+| `llama-server` (the sharded model) | node-a | `com.caravan.llama-server` |
+| `slot_pin_proxy.py` (the proxy openclaw talks to) | node-a | `com.caravan.slot-pin-proxy` |
+| `rpc-server` (node-b's compute half) | node-b | `com.caravan.rpc-server` |
+
+All three plists are bootstrapped **directly from this repo's `launchd/`
+directory** — there's no separate copy in `~/Library/LaunchAgents/` to
+keep in sync. Editing a plist and re-bootstrapping (or editing
+`proxy/slot_pin_proxy.py` and just restarting) always picks up the
+current repo state.
+
+### Check status
+
+```sh
+launchctl list | grep caravan                    # node-a
+ssh brenden@<node-b-ip> 'launchctl list | grep caravan'   # node-b
+
+curl http://127.0.0.1:8080/health   # llama-server directly
+curl http://127.0.0.1:8090/health   # the proxy (what openclaw actually talks to)
+curl http://127.0.0.1:8080/slots    # per-slot detail (busy/idle, token counts, cache hits)
+```
+
+Logs: `~/Library/Logs/caravan/*.log` on each machine.
+
+### Restart
+
+**`slot-pin-proxy`** (only the Python file changed — most commits): a
+plain restart re-reads the script from disk, no plist changes needed.
+
+```sh
+launchctl kickstart -k gui/$(id -u)/com.caravan.slot-pin-proxy
+```
+
+**`llama-server`** (the plist's `ProgramArguments` changed — new flags,
+model path, etc.) or **`rpc-server`**: `kickstart` alone won't pick up
+plist edits — launchd needs to fully re-read the file:
+
+```sh
+launchctl bootout gui/$(id -u)/com.caravan.llama-server
+launchctl bootstrap gui/$(id -u) ~/dev/caravan/launchd/com.caravan.llama-server.plist
+```
+
+Restarting `llama-server` triggers a full model reload — currently
+**~7-11 minutes** (WiFi-bound shard transfer to node-b; see
+[docs/LOG.md](docs/LOG.md)), so avoid it mid-conversation when possible.
+**Never restart node-b's `rpc-server` while `llama-server` is loading** —
+doing so mid-transfer corrupts the in-flight load (see docs/LOG.md).
+Check `curl http://127.0.0.1:8080/slots` shows everything idle first.
+
+### Stop
+
+```sh
+launchctl bootout gui/$(id -u)/com.caravan.<label>
+```
+
+Removes it from launchd entirely — it will *not* come back on its own
+(no more `KeepAlive`) until bootstrapped again.
+
+### First-time setup on a new machine
+
+See [launchd/README.md](launchd/README.md).
+
 ## Why
 
 Ollama itself has no multi-machine sharding — it's deliberately single-node.

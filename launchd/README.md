@@ -20,21 +20,27 @@ stage yet (see PLAN.md stage 3).
 
 Logs go to `~/Library/Logs/caravan/*.log` on each machine.
 
+**All plists are bootstrapped directly from this repo's checkout path** —
+there is no copy step into `~/Library/LaunchAgents/`. That was the original
+approach (see the old version of this doc) but it left two sources of
+truth that could silently drift; the repo path is now the only one that
+matters on both nodes. Clone/place the repo at the same path
+(`~/dev/caravan`) on each machine, or adjust the paths below accordingly.
+
 ## Install (node-a: llama-server + slot-pin-proxy)
 
 ```sh
 mkdir -p ~/Library/Logs/caravan
-cp launchd/com.caravan.llama-server.plist launchd/com.caravan.slot-pin-proxy.plist ~/Library/LaunchAgents/
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.caravan.llama-server.plist
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.caravan.slot-pin-proxy.plist
+launchctl bootstrap gui/$(id -u) ~/dev/caravan/launchd/com.caravan.llama-server.plist
+launchctl bootstrap gui/$(id -u) ~/dev/caravan/launchd/com.caravan.slot-pin-proxy.plist
 ```
 
 ## Install (node-b: rpc-server)
 
 ```sh
 ssh brenden@<node-b-ip> 'mkdir -p ~/Library/Logs/caravan'
-scp launchd/com.caravan.rpc-server.plist brenden@<node-b-ip>:~/Library/LaunchAgents/
-ssh brenden@<node-b-ip> 'launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.caravan.rpc-server.plist'
+# repo must already be checked out at ~/dev/caravan on node-b
+ssh brenden@<node-b-ip> 'launchctl bootstrap gui/$(id -u) ~/dev/caravan/launchd/com.caravan.rpc-server.plist'
 ```
 
 ## Check status / logs
@@ -46,14 +52,29 @@ tail -f ~/Library/Logs/caravan/llama-server.log
 
 ## Restart after editing a plist
 
+Editing `ProgramArguments` (flags, paths) requires a full re-read — `kickstart`
+alone won't pick it up:
+
 ```sh
 launchctl bootout gui/$(id -u)/com.caravan.<name>
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.caravan.<name>.plist
+launchctl bootstrap gui/$(id -u) ~/dev/caravan/launchd/com.caravan.<name>.plist
 ```
+
+If only the underlying script changed (e.g. `slot_pin_proxy.py`, not its
+plist), a plain kickstart is enough:
+
+```sh
+launchctl kickstart -k gui/$(id -u)/com.caravan.<name>
+```
+
+See the main [README's Usage section](../README.md#usage) for
+machine/service specifics and restart caveats (e.g. never restart
+`rpc-server` while `llama-server` is mid-load).
 
 ## Uninstall
 
 ```sh
 launchctl bootout gui/$(id -u)/com.caravan.<name>
-rm ~/Library/LaunchAgents/com.caravan.<name>.plist
 ```
+
+(No file to remove — nothing was copied to `~/Library/LaunchAgents/`.)
