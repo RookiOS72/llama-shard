@@ -66,11 +66,28 @@ can't evict each other at all, up to N_SLOTS concurrently-active sessions
 -- beyond that hard ceiling something has to give, which is a real
 resource limit (each slot reserves its own chunk of context memory), not
 a bug to chase further. See docs/LOG.md.
+
+2026-09-06 update #4: none of the above stopped a request from running
+to completion server-side after its client had already given up
+(openclaw's own timeout, or a person closing the TUI) -- confirmed
+directly tonight, a request kept processing for minutes after openclaw
+had already logged it as a terminal error, still holding both an
+llama-server slot and the FIFO gate the whole time, delaying every real
+request queued behind it. `ProxyHandler._client_gone()` now polls the
+client connection (non-blocking peek, no data consumed) while waiting on
+a slow upstream and while streaming; the moment the client's gone, the
+proxy shuts down its own connection to llama-server, which triggers
+llama-server's own existing cancel-on-disconnect handling (the same
+"stop: cancel task" path already seen tonight whenever the proxy itself
+restarted mid-request) -- so an abandoned request now actually frees the
+slot and the queue instead of grinding on for nobody.
 """
 import hashlib
 import http.client
 import json
 import os
+import select
+import socket
 import sys
 import threading
 import time
@@ -159,7 +176,14 @@ def session_fingerprint(body: dict) -> str:
     sent), distinct across sessions, with no cooperation needed from
     openclaw (no session id is present in the OpenAI-compatible wire
     format). A session's later turns still fingerprint identically since
-    they resend the same early history each time."""
+    they resend the same early history each time.
+
+    2026-09-06: three separate real requests to what should be the same
+    openclaw session (agent:main:main) fingerprinted to three different
+    slots -- this assumption is wrong or incomplete somehow, not yet
+    root-caused. DEBUG logging added below (temporary, remove once
+    understood) to see exactly what's actually being hashed each time,
+    since guessing from openclaw's source wasn't conclusive."""
     messages = body.get("messages")
     if isinstance(messages, list):
         for m in messages:
@@ -167,10 +191,23 @@ def session_fingerprint(body: dict) -> str:
                 content = m.get("content", "")
                 if not isinstance(content, str):
                     content = json.dumps(content, sort_keys=True)
-                return hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
+                fp = hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
+                sys.stderr.write(
+                    f"[slot-pin-proxy][fp-debug] n_messages={len(messages)} "
+                    f"first_non_system_role={m.get('role')!r} "
+                    f"content_len={len(content)} "
+                    f"content_preview={content[:120]!r} "
+                    f"fingerprint={fp}\n"
+                )
+                return fp
     # No non-system message found (unusual) -- fall back to hashing the
     # whole body so it's at least stable within one retried request.
-    return hashlib.sha256(json.dumps(body, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+    fp = hashlib.sha256(json.dumps(body, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+    sys.stderr.write(
+        f"[slot-pin-proxy][fp-debug] no non-system message found, "
+        f"hashed whole body, fingerprint={fp}\n"
+    )
+    return fp
 
 
 def pick_slot(body: dict) -> int:
@@ -200,6 +237,10 @@ def pick_slot(body: dict) -> int:
 class ProxyHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
+    # How often to check whether the client (openclaw) is still there while
+    # we're blocked waiting on a slow upstream. See _client_gone().
+    DISCONNECT_POLL_INTERVAL = 0.5
+
     def log_message(self, fmt, *args):
         sys.stderr.write("[slot-pin-proxy] " + (fmt % args) + "\n")
 
@@ -210,6 +251,25 @@ class ProxyHandler(BaseHTTPRequestHandler):
             # Harmless: client closed a keep-alive connection between
             # requests instead of sending another one.
             self.close_connection = True
+
+    def _client_gone(self) -> bool:
+        """Non-blocking check for whether the client has closed its side
+        of the connection -- used so a slow cold-start (minutes of prompt
+        processing with no bytes sent yet) doesn't keep grinding away
+        after openclaw has already given up and moved on (its own
+        timeout, or the user killing the TUI). Peeks without consuming:
+        a client that's just quietly waiting for our response shows up
+        as "not readable" and is left alone; only an actual FIN/RST
+        (readable, zero bytes, or a read error) counts as gone. See
+        module docstring, "keep the LLM working only on requests someone
+        is still waiting on" -- 2026-09-06."""
+        try:
+            ready, _, _ = select.select([self.connection], [], [], 0)
+            if not ready:
+                return False
+            return self.connection.recv(1, socket.MSG_PEEK) == b""
+        except OSError:
+            return True
 
     def _forward(self, method: str):
         raw_len = int(self.headers.get("Content-Length", 0) or 0)
@@ -253,13 +313,50 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
         conn = http.client.HTTPConnection(UPSTREAM_HOST, UPSTREAM_PORT)
         try:
-            try:
-                conn.request(method, self.path, body=raw_body, headers=headers)
-                upstream_resp = conn.getresponse()
-            except OSError as e:
-                # llama-server isn't up yet/crashed -- common right after a
-                # launchd (re)start race, not worth a traceback.
-                self.log_message("%s %s -> upstream unreachable (%s)", method, self.path, e)
+            # conn.getresponse() blocks with no timeout -- during a cold
+            # prompt-processing run that can be many minutes with zero
+            # bytes sent yet, so it happens on a background thread while
+            # the main thread polls _client_gone(). If the client leaves,
+            # shutting down conn's socket unblocks the thread immediately
+            # and tells llama-server its client (us) disconnected, which
+            # triggers its own existing cancel-on-disconnect handling --
+            # same path already observed tonight when the proxy itself
+            # was restarted mid-request. This is what actually frees the
+            # slot and the FIFO gate instead of both sitting on a
+            # request nobody is waiting for.
+            response_box: dict = {}
+
+            def _do_upstream_request():
+                try:
+                    conn.request(method, self.path, body=raw_body, headers=headers)
+                    response_box["resp"] = conn.getresponse()
+                except Exception as e:
+                    response_box["exc"] = e
+
+            req_thread = threading.Thread(target=_do_upstream_request, daemon=True)
+            req_thread.start()
+            while req_thread.is_alive():
+                if self._client_gone():
+                    self.log_message(
+                        "%s %s -- client gone, cancelling upstream (was waiting on response)",
+                        method, self.path,
+                    )
+                    if conn.sock is not None:
+                        try:
+                            conn.sock.shutdown(socket.SHUT_RDWR)
+                        except OSError:
+                            pass
+                    req_thread.join(timeout=2)
+                    return
+                req_thread.join(timeout=self.DISCONNECT_POLL_INTERVAL)
+
+            if "exc" in response_box:
+                exc = response_box["exc"]
+                if not isinstance(exc, OSError):
+                    raise exc
+                # llama-server isn't up yet/crashed -- common right after
+                # a launchd (re)start race, not worth a traceback.
+                self.log_message("%s %s -> upstream unreachable (%s)", method, self.path, exc)
                 body = b"llama-server upstream unreachable\n"
                 self.send_response(502)
                 self.send_header("Content-Type", "text/plain")
@@ -268,6 +365,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 self.wfile.write(body)
                 return
 
+            upstream_resp = response_box["resp"]
             self.log_message(
                 "%s %s -> %s%s", method, self.path, upstream_resp.status, slot_note
             )
@@ -280,8 +378,16 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
             # Stream the response back as it arrives -- required for SSE
-            # (stream: true) so tokens still show up incrementally.
+            # (stream: true) so tokens still show up incrementally. Also
+            # watched for disconnect here: generation alone can run
+            # minutes at this hardware's ~4 tok/s, same reasoning as above.
             while True:
+                if self._client_gone():
+                    self.log_message(
+                        "%s %s -- client gone, cancelling upstream (was streaming)",
+                        method, self.path,
+                    )
+                    return
                 chunk = upstream_resp.read(4096)
                 if not chunk:
                     break
