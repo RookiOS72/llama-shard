@@ -22,9 +22,12 @@
       <string>--port</string>
       <string>8080</string>
       <string>-c</string>
-      <string>65536</string>
+      <string>262144</string>
       <string>--slot-save-path</string>
       <string>/Users/brenden/.caravan/llama-server/slots/</string>
+      <string>--parallel</string>
+      <string>4</string>
+      <string>--no-kv-unified</string>
     </array>
 
     <key>WorkingDirectory</key>

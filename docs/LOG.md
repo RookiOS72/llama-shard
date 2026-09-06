@@ -886,3 +886,100 @@ on -- e.g. checking available pool space before attempting a restore,
 or only seeding when the other slots are idle/small. Left the code in
 place, provably unreachable, with this reasoning attached, rather than
 deleting it.
+
+### Testing `--no-kv-unified` as the real fix for the shared-pool constraint
+
+Rather than patching seed-restore to work around `kv_unified=true`'s
+shared pool, tested removing the constraint at the source: added
+`--no-kv-unified` to `com.caravan.llama-server.plist` so each of the 4
+slots gets its own independent 65536-token KV buffer instead of sharing
+one pool. Estimated cost ~4x KV memory (roughly 1GB -> 4GB), judged
+affordable on 24GB machines. Bootstrapped clean (`bootout` + `bootstrap`
+from the repo path, all slots confirmed idle first).
+
+**First attempt silently didn't work.** After the ~10 minute reload
+finished, the server's own startup log read
+`kv_unified = 'true'` -- the flag had no effect. Read
+`tools/server/server.cpp` to find out why: when `--parallel` isn't
+passed explicitly, `params.n_parallel` defaults to `-1` ("auto"), and
+there's an unconditional block that fires on that auto path:
+
+```cpp
+if (params.n_parallel < 0) {
+    SRV_TRC("%s", "n_parallel is set to auto, using n_parallel = 4 and kv_unified = true\n");
+    params.n_parallel = 4;
+    params.kv_unified = true;
+}
+```
+
+This runs *after* CLI arg parsing and overwrites `params.kv_unified`
+unconditionally -- so `--no-kv-unified` was being silently clobbered
+back to `true` on every start, because this plist has never passed
+`--parallel` (it relies on the same auto-sizing to get 4 slots). Fixed
+by adding `--parallel 4` explicitly alongside `--no-kv-unified`, which
+keeps the slot count the same but skips the auto branch entirely,
+letting the CLI flag actually stick. Confirmed live:
+`n_slots = 4, n_ctx_slot = 16384, kv_unified = 'false'` -- the fix
+worked, `--parallel 4` really was the missing piece.
+
+### The 16K-per-slot cap was a real regression -- caught before shipping it
+
+`n_ctx_slot = 16384` is `-c 65536` (the pre-existing flag) split evenly
+across 4 now-independent slots. Checked that against actual usage
+before calling this done: grepping the server log for past `n_tokens`
+values on completed requests showed real sessions have already reached
+**38,273 - 40,423 tokens** tonight alone -- more than double the new
+16,384 cap. Shipping this as-is would have silently broken (truncated
+or failed) any session that grows past 16K, which based on tonight's
+own numbers is not a rare case.
+
+Checked memory headroom before proposing a fix: both machines were down
+to ~100MB of free VM pages with the model loaded -- there wasn't
+obviously room to just quadruple the per-slot budget back to 65536
+(4 slots x 65536 vs. the original single shared 65536 pool is a real 4x
+KV memory increase). Flagged the tradeoff explicitly rather than
+picking a side unilaterally: revert to `kv_unified=true` (dormant risk,
+since seed-restore -- the only feature that ever exercised the shared-pool
+failure mode -- is already disabled) vs. accept the 16K cap vs. try to
+push `-c` higher despite the tight headroom. User chose to try pushing
+`-c` higher and monitor memory directly.
+
+### Raising `-c` to 262144 to get 65536/slot with kv_unified=false
+
+Bumped `-c` from 65536 to 262144 (65536 x 4) so each of the 4
+independent slots gets the originally-intended 65536-token budget.
+Reloaded clean (slots confirmed idle first). Loaded successfully and
+confirmed live: `n_slots = 4, n_ctx_slot = 65536, kv_unified = 'false'`,
+`/health` ok, all 4 slots idle at `n_ctx: 65536`. Memory landed about
+as tight as the original `kv_unified=true` config (~70-110MB free VM
+pages on each machine) -- it fits, but with very little margin. This is
+the expected ~4x KV cost materializing; whether it holds up under real
+concurrent multi-session load (as opposed to idle-but-loaded) is still
+unverified.
+
+### Self-inflicted crash: restarting node-b's rpc-server after llama-server was already loaded
+
+Went to fix the node-b `rpc-server` plist's stale `~/Library/LaunchAgents/`
+path (deferred earlier tonight, see the launchd path-consistency section)
+now that the `-c 262144` load was confirmed stable. Bootout+bootstrap on
+node-b's rpc-server crashed llama-server within seconds:
+`ggml-rpc.cpp:566: Remote RPC server crashed or returned malformed
+response` -> `ggml_abort`.
+
+The earlier rule from tonight ("never restart rpc-server mid-transfer")
+was too narrow. `rpc-server` is stateless and holds node-b's half of the
+model only in that process's own RAM for as long as the process lives --
+restarting it wipes that state at *any* point while llama-server is
+connected, not just during the initial load. llama-server holds a live
+RPC session against it for its entire runtime, so the correct rule is:
+never restart node-b's rpc-server while llama-server is running at all.
+The only safe order is to restart llama-server itself afterward (which
+re-establishes the connection from scratch and re-transfers), or to stop
+llama-server first, restart rpc-server, then start llama-server.
+
+launchd's `KeepAlive` caught the crash and auto-restarted llama-server
+immediately (visible as a fresh boot sequence in the log within the same
+second) -- no manual intervention needed to bring it back up, just
+another full cold reload to sit through. rpc-server's plist path fix
+itself succeeded (now loading from the repo path like the other two
+services, confirmed via `launchctl print`).
