@@ -23,6 +23,8 @@
       <string>8080</string>
       <string>-c</string>
       <string>65536</string>
+      <string>--slot-save-path</string>
+      <string>/Users/brenden/.caravan/llama-server/slots/</string>
     </array>
 
     <key>WorkingDirectory</key>

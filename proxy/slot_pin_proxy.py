@@ -269,11 +269,11 @@ def session_fingerprint(body: dict) -> str:
     return fp
 
 
-def pick_slot(body: dict) -> int:
+def pick_slot(fingerprint: str) -> int:
     """Prefer this session's assigned slot for cache reuse, but don't
     steal a busy slot from an in-flight request -- route to any other
     idle slot instead."""
-    preferred = session_slots.slot_for(session_fingerprint(body))
+    preferred = session_slots.slot_for(fingerprint)
     try:
         conn = http.client.HTTPConnection(UPSTREAM_HOST, UPSTREAM_PORT, timeout=2)
         conn.request("GET", "/slots")
@@ -293,6 +293,92 @@ def pick_slot(body: dict) -> int:
     return preferred
 
 
+# --- Disk-persisted slot cache (issue #4) ---------------------------------
+# Requires llama-server to be started with --slot-save-path (see
+# ../launchd/com.caravan.llama-server.plist). Saves a slot's actual KV
+# cache to disk after each successful reply and restores it on first use
+# after a restart -- unlike SessionSlotAssigner's persistence above
+# (which only remembers *which* slot a session prefers), this persists
+# the cache *content* itself, so it survives an llama-server restart, not
+# just a proxy restart. See docs/LOG.md and GitHub issue #4.
+SLOT_SAVE_DIR = Path(os.environ.get(
+    "CARAVAN_SLOT_SAVE_DIR",
+    str(Path.home() / ".caravan" / "llama-server" / "slots"),
+))
+
+_restored_this_run: set = set()
+_restore_lock = threading.Lock()
+
+
+def _slot_save_filename(fingerprint: str) -> str:
+    return f"{fingerprint}.bin"
+
+
+def _post_json_to_upstream(path: str, body: dict, timeout: float):
+    """POST JSON straight to llama-server (not through the FIFO -- this
+    runs from inside a request that already holds the gate) and return
+    the parsed response, or None on any failure. Best-effort by design:
+    every caller treats a failure here as "carry on cold", never as a
+    reason to fail the real request."""
+    try:
+        conn = http.client.HTTPConnection(UPSTREAM_HOST, UPSTREAM_PORT, timeout=timeout)
+        data = json.dumps(body).encode("utf-8")
+        conn.request("POST", path, body=data, headers={"Content-Type": "application/json"})
+        resp = conn.getresponse()
+        raw = resp.read()
+        conn.close()
+        if resp.status != 200:
+            return None
+        return json.loads(raw)
+    except Exception:
+        return None
+
+
+def maybe_restore_slot(slot_id: int, fingerprint: str) -> None:
+    """If this fingerprint has a saved cache on disk and we haven't
+    already tried restoring it in this proxy process's lifetime, restore
+    it into slot_id before the real request uses it. Once-per-fingerprint
+    guard exists so a session that's already warm in memory (the common
+    case after the first request) doesn't pay a disk round-trip on every
+    single turn -- only right after a restart, when it matters."""
+    with _restore_lock:
+        if fingerprint in _restored_this_run:
+            return
+        _restored_this_run.add(fingerprint)
+    save_path = SLOT_SAVE_DIR / _slot_save_filename(fingerprint)
+    if not save_path.exists():
+        return
+    result = _post_json_to_upstream(
+        f"/slots/{slot_id}?action=restore",
+        {"filename": _slot_save_filename(fingerprint)},
+        timeout=120.0,
+    )
+    if result is not None:
+        sys.stderr.write(
+            f"[slot-pin-proxy] restored slot {slot_id} from disk for fingerprint {fingerprint}\n"
+        )
+    else:
+        sys.stderr.write(
+            f"[slot-pin-proxy] restore failed for slot {slot_id}, fingerprint {fingerprint} "
+            "(continuing cold, not fatal)\n"
+        )
+
+
+def save_slot(slot_id: int, fingerprint: str) -> None:
+    """Best-effort save after a successful completion. Never raises --
+    a failed save just means the next restart pays the cold cost again,
+    not a broken response for the request that triggered it."""
+    result = _post_json_to_upstream(
+        f"/slots/{slot_id}?action=save",
+        {"filename": _slot_save_filename(fingerprint)},
+        timeout=120.0,
+    )
+    if result is not None:
+        sys.stderr.write(f"[slot-pin-proxy] saved slot {slot_id} to disk for fingerprint {fingerprint}\n")
+    else:
+        sys.stderr.write(f"[slot-pin-proxy] save failed for slot {slot_id}, fingerprint {fingerprint}\n")
+
+
 class ProxyHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -306,7 +392,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
     def handle_one_request(self):
         try:
             super().handle_one_request()
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError, http.client.HTTPException):
             # Harmless: client closed a keep-alive connection between
             # requests instead of sending another one.
             self.close_connection = True
@@ -351,16 +437,22 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
     def _forward_locked(self, method: str, raw_body: bytes, is_completion: bool):
         slot_note = ""
+        slot_for_save = None
+        fingerprint_for_save = None
         if is_completion:
             try:
                 data = json.loads(raw_body)
             except ValueError:
                 data = None
             if isinstance(data, dict):
-                slot = pick_slot(data)
+                fingerprint = session_fingerprint(data)
+                slot = pick_slot(fingerprint)
+                maybe_restore_slot(slot, fingerprint)
                 data["id_slot"] = slot
                 raw_body = json.dumps(data).encode("utf-8")
                 slot_note = f" id_slot={slot}"
+                slot_for_save = slot
+                fingerprint_for_save = fingerprint
 
         headers = {
             k: v
@@ -452,7 +544,28 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     break
                 self.wfile.write(chunk)
                 self.wfile.flush()
-        except (BrokenPipeError, ConnectionResetError):
+
+            # Reached only on a genuinely complete response (loop above
+            # exited via the normal "no more chunks" path, not an early
+            # return) -- save this slot's cache now so a future restart
+            # can restore it instead of reprocessing from scratch. Runs
+            # while still holding the FIFO gate, so the next queued
+            # request waits for this too -- the latency cost users
+            # explicitly signed up for in exchange for surviving restarts,
+            # see docs/LOG.md, issue #4.
+            if upstream_resp.status == 200 and slot_for_save is not None:
+                save_slot(slot_for_save, fingerprint_for_save)
+        except (BrokenPipeError, ConnectionResetError, http.client.HTTPException):
+            # http.client.HTTPException (e.g. IncompleteRead) added
+            # 2026-09-06: caught live during the --slot-save-path restart
+            # test -- llama-server can accept a TCP connection and send a
+            # malformed/truncated chunked response in the brief window
+            # before it's actually ready, which isn't a BrokenPipeError or
+            # ConnectionResetError and was escaping uncaught, crashing
+            # that request's thread with a raw traceback in the log. Not
+            # fatal (each request is its own thread, and openclaw's own
+            # retry recovered), but noisy and worth treating the same as
+            # any other "upstream connection didn't behave" case.
             pass
         finally:
             conn.close()
