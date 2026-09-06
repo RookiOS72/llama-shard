@@ -17,10 +17,22 @@ guaranteed instead of lucky.
 
 Today openclaw only has one real conversation identity (the "main"
 agent; heartbeats run inside that same session -- see openclaw.json),
-so a single fixed slot for everything is the correct-sized fix. If a
-second identity shows up later (e.g. a separate agent), extend
+so a single preferred slot for everything is the correct-sized fix. If
+a second identity shows up later (e.g. a separate agent), extend
 `pick_slot()` to map identities to distinct slot numbers instead of
 rewriting this.
+
+2026-09-06 update: pinning was originally unconditional (always
+id_slot=PINNED_SLOT), which is fine for one request at a time but
+actively harmful when two calls for the same session overlap (e.g. a
+heartbeat firing while a manual/CLI turn is still mid-flight on slow
+hardware): the second request grabbing the same busy slot forces
+llama-server to cancel whatever the first one was doing. Now `pick_slot`
+checks `/slots` first and only pins to PINNED_SLOT if it's actually
+idle; otherwise it hands the request to any other idle slot so two
+overlapping calls don't fight over one. Falls back to PINNED_SLOT
+(old behavior) only if every slot is busy or the `/slots` check itself
+fails -- no worse than before in that case, just no better.
 """
 import http.client
 import json
@@ -39,7 +51,24 @@ COMPLETION_PATHS = {"/v1/chat/completions", "/v1/completions", "/completion"}
 
 
 def pick_slot(_body: dict) -> int:
-    """Single fixed slot for now -- see module docstring."""
+    """Prefer PINNED_SLOT for cache reuse, but don't steal it from an
+    in-flight request -- route to any idle slot instead when it's busy."""
+    try:
+        conn = http.client.HTTPConnection(UPSTREAM_HOST, UPSTREAM_PORT, timeout=2)
+        conn.request("GET", "/slots")
+        resp = conn.getresponse()
+        slots = json.loads(resp.read())
+        conn.close()
+    except Exception:
+        return PINNED_SLOT
+
+    by_id = {s.get("id"): s for s in slots if isinstance(s, dict)}
+    pinned = by_id.get(PINNED_SLOT)
+    if pinned is not None and not pinned.get("is_processing"):
+        return PINNED_SLOT
+    for s in slots:
+        if isinstance(s, dict) and not s.get("is_processing"):
+            return s.get("id", PINNED_SLOT)
     return PINNED_SLOT
 
 
