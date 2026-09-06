@@ -983,3 +983,41 @@ second) -- no manual intervention needed to bring it back up, just
 another full cold reload to sit through. rpc-server's plist path fix
 itself succeeded (now loading from the repo path like the other two
 services, confirmed via `launchctl print`).
+
+### End-to-end confirmation of kv_unified=false in real use
+
+Ran a real test through the actual `openclaw agent` CLI (not just
+`/slots`/`/health` checks) after the crash-recovery reload settled, plus
+the user ran their own manual tests through openclaw directly. Two
+findings, one good and one worth flagging separately (see next entry):
+
+- **Cold start is unregressed.** First real message took ~7 minutes --
+  matches the historical pre-kv_unified=false baseline. So the larger
+  `-c 262144` config didn't cost anything on the thing that already
+  worked.
+- **Cache-hit follow-ups are fast.** Plain greetings and factual/math
+  questions on an already-warm session came back in 11-15 seconds.
+- **Tool-calling questions are much slower, but not because of the model
+  or kv_unified.** Asking "who am I" took ~3 minutes. Root cause,
+  confirmed directly: this kind of question makes openclaw's agent loop
+  call tools (`memory_search`, `read` on USER.md/MEMORY.md, etc.)
+  instead of answering directly -- each tool round-trip is its own full
+  completion call through llama-server. Individually fast (cache-hit),
+  but 3-5+ stacked rounds adds up to minutes even with no single slow
+  step. This is an openclaw-agent-loop cost, not a Caravan-side problem.
+
+### My own test accidentally ran in the live `agent:main:main` session and timed out
+
+Testing end-to-end via `openclaw agent -m "..."` reused the real
+`agent:main:main` session (not an isolated test session) and triggered
+an 8-assistant-turn tool-calling run (`memory_search`, `sessions_search`,
+`sessions_history`, `read`, `exec`, `sessions_list`) that ran the full
+15-minute `agents.defaults.timeoutSeconds` without producing a reply.
+Checked whether this left `main` in the same stuck/dangling state as the
+original handoff's known issue (`openclaw sessions tail`): it didn't --
+openclaw closed it out cleanly (`session.ended interrupted`) rather than
+leaving a hung mid-turn. Still added a chunk of failed-tool-call noise to
+that session's history, the same kind of bloat that caused the original
+stuck-session problem -- flagged to the user as a candidate for the same
+`openclaw sessions compact "agent:main:main" --agent main --max-lines 10`
+fix used before, rather than compacting unprompted.
