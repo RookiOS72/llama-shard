@@ -1021,3 +1021,48 @@ that session's history, the same kind of bloat that caused the original
 stuck-session problem -- flagged to the user as a candidate for the same
 `openclaw sessions compact "agent:main:main" --agent main --max-lines 10`
 fix used before, rather than compacting unprompted.
+
+## Issue #2: investigated the system prompt, found a safety bug along the way
+
+Per the issue's own planned order: checked `tools.profile: "coding"` for
+unnecessary weight before touching `AGENTS.md`. Per openclaw's own docs
+(`docs.openclaw.ai/gateway/config-tools`), "coding" baseline is
+`group:fs, group:runtime, group:web, group:sessions, group:memory, cron,
+goal tools, progress_card, ask_user, skill_workshop` -- notably,
+`group:sessions` already includes `sessions_spawn`/`sessions_yield`, so
+those two entries in `tools.alsoAllow` were pure no-ops (removing them
+changed nothing, confirmed by measurement). `browser` was the one real
+addition beyond the coding baseline: removing it dropped
+`tools.schemaChars` from 45,650 to 40,709 (-4,941 chars), confirmed via
+`openclaw agent --json`'s `systemPromptReport`. Kept `message` in
+`alsoAllow` untouched -- it's very likely what delivers replies to chat
+channels, not something to remove blind.
+
+**Bigger finding, unrelated to prompt size:** `AGENTS.md` (26,749 raw
+chars) was being silently truncated to 19,182 chars by the 20,000-char
+`agents.defaults.bootstrapMaxChars` limit -- and the cut landed right
+after "## 1. Purpose" of the "Income Generation Module," dropping
+Sections 2-8 entirely. That includes Section 4, the financial firewall
+("Rook may never move money, in any amount, for any reason, without
+explicit per-instance approval"), the autonomy tiers, and the escalation
+default. None of that was reaching the model, on any session, silently.
+Checked whether splitting the module into its own file would avoid the
+size cost: no -- openclaw's bootstrap injection only recognizes a fixed
+file set (`AGENTS.md`, `SOUL.md`, `USER.md`, `IDENTITY.md`,
+`HEARTBEAT.md`), confirmed via the config schema, so a split file
+wouldn't auto-load and would depend on the model remembering to go read
+it -- not acceptable for a safety-relevant rule. Fixed by raising
+`agents.defaults.bootstrapMaxChars` to 30000 (all 5 bootstrap files
+combined are only ~31,762 raw chars, nowhere near the separate 60,000
+`bootstrapTotalMaxChars` ceiling, so this was free room, not a tradeoff
+against that limit).
+
+**Net effect measured live:** `systemPrompt.chars` went from ~38,883 to
+45,741 -- *up*, not down. The tools trim saved 4,941 chars; restoring the
+truncated 7,567 chars of real safety content cost more than that saved.
+Correct tradeoff (a live safety gap outweighs a size optimization), but
+it means this round didn't accomplish the issue's original goal of
+shrinking cold-start cost. The remaining lever is trimming `AGENTS.md`'s
+actual content -- real policy the user wrote, not something to cut
+without them reviewing it, so left as an open, user-owned option rather
+than done tonight.
