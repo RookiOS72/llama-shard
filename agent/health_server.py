@@ -11,12 +11,32 @@ slot-pin-proxy's loopback-only trust model, though this binds all
 interfaces since peers need to reach it -- LAN/tailnet-only by design,
 same posture as rpc-server itself, see launchd/README.md's security
 note).
+
+2026-09-06: first real cross-node test (see docs/LOG.md) found this
+hanging for ~35s on startup on node-b specifically. Root cause:
+`http.server.HTTPServer.server_bind()` calls `socket.getfqdn(host)` to
+set `self.server_name`, and `getfqdn('0.0.0.0')` does a reverse-DNS-style
+lookup that's slow/near-broken on that machine's network config for
+reasons not otherwise investigated -- confirmed in isolation, unrelated
+to anything else in this file. `_Server` below skips that lookup
+entirely; nothing here actually uses `server_name`/`server_port` for
+anything, so there's no downside to not resolving them.
 """
 import json
+import socketserver
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import config
+
+
+class _Server(ThreadingHTTPServer):
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        # Skip HTTPServer's socket.getfqdn() reverse-DNS lookup -- see
+        # module docstring. Bare IP is all we ever need here.
+        self.server_name = self.server_address[0]
+        self.server_port = self.server_address[1]
 
 
 class _HealthHandler(BaseHTTPRequestHandler):
@@ -43,7 +63,7 @@ def start(node_id: str) -> threading.Thread:
     daemon thread and returns it. Dies with the process -- nothing to
     explicitly stop."""
     handler = type("_BoundHealthHandler", (_HealthHandler,), {"node_id": node_id})
-    server = ThreadingHTTPServer(("0.0.0.0", config.AGENT_PORT), handler)
+    server = _Server(("0.0.0.0", config.AGENT_PORT), handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return thread
