@@ -295,3 +295,89 @@ is ready).
     same as before this issue was opened -- no regression, but the
     "survives a reboot" goal isn't met for this one process yet. See
     issue #1 for follow-up.
+
+## 2026-09-06
+
+### Why model load takes 5-7 minutes when exo takes seconds
+
+Prompted by comparing today's repeated launchd-testing restarts (each
+paying a fresh multi-minute load) against exo's near-instant startup on
+the same hardware. Two compounding, independently-verified causes:
+
+- **Wrong network path.** `route get <node-b-ip>` resolves over `en1`,
+  confirmed via `networksetup -listallhardwareports` to be **Wi-Fi**, not
+  wired Ethernet (`en0` is `status: inactive` -- no cable connected) or
+  the Thunderbolt-RDMA path the build actually compiled in support for
+  (`en2`/`en3`/`en4` show no link at all -- no Thunderbolt cable between
+  the two Macs). WiFi link is 802.11ax at a 1020 Mbps PHY rate, so maybe
+  400-500 Mbps of real TCP throughput -- nowhere near what a wired or
+  Thunderbolt link would give.
+- **Every restart re-transfers the full shard from scratch.** This is
+  the more fundamental one. `rpc-server` on node-b is stateless: it holds
+  tensors only in that process's RAM for as long as it's alive, nothing
+  persisted to its own disk. So node-a's `llama-server` streams node-b's
+  ~8GB half of the 16GB model (`--tensor-split 1,1`) across Wi-Fi *every
+  single time it starts* -- not a one-time cost. Doing the math (8GB over
+  even a generous ~450 Mbps effective WiFi throughput should be ~2.5
+  min) against the observed 5-7 min points to real protocol overhead on
+  top of the network bottleneck too -- consistent with PLAN.md's own
+  risk note that the RPC backend is "less mature/optimized."
+- exo doesn't have this problem not because its network path is faster,
+  but because it doesn't do this transfer on every launch at all: each
+  exo node already holds its assigned shard on local disk, so "starting"
+  a run is just a local file load.
+
+### Design: shard-scoped local cache on node-b, not a full copy like exo
+
+The instinct is "just do what exo does" -- give node-b a persistent local
+copy so restarts don't re-pay the network cost. But exo's specific
+approach has a real, already-observed inefficiency worth avoiding rather
+than copying: per this project's own earlier note (see "Wiring it into a
+real assistant" section above), exo "required each node to hold its own
+**full** copy on disk," even though each node only ever computes on its
+own assigned slice at runtime. On this 2-node, 16GB-model setup that's
+32GB stored to run something that only needs 16GB total -- and it scales
+linearly worse with more nodes (an N-node cluster needs N full copies of
+every model, each node using only ~1/N of its own copy).
+
+Proposed design instead: node-a stays the single source of truth (as
+now, zero footprint needed on node-b for correctness); node-b caches
+**only the tensor range it's actually assigned** under the current
+`--tensor-split`, keyed by a hash of (source file content, split
+boundary, device assignment). This gets exo's fast-restart property
+without exo's N-way disk duplication, and the single-source-of-truth
+design gives two things exo's static per-node-copy model doesn't obviously have:
+
+- **No version-skew risk** -- a hash-keyed cache self-invalidates if
+  node-a's model file changes, so node-b can never silently serve a
+  stale/mismatched shard the way per-node full copies could drift if one
+  node's copy isn't resynced after a model update.
+- **Cheap re-splitting** -- changing `--tensor-split` (e.g. node-b gets
+  faster hardware and should take more layers) just changes the cache
+  key and triggers a fetch of the new range, vs. exo's model likely
+  needing the affected files redistributed to match a new boundary.
+
+Not evaluated: how exo actually handles elastic node add/remove or
+failure recovery internally -- no basis to claim an edge there without
+reading its source or testing it, so left as an open question rather
+than an assumed advantage.
+
+**Scope/priority note, to keep from over-building this:** the payoff is
+specifically boot-time/crash-recovery latency (relevant to issue #1's
+"survives a reboot" goal), not per-request latency -- that's already
+solved by the slot-pinning proxy (see 2026-09-05 entries above). Once
+llama-server is genuinely stable under supervision, it may restart rarely
+in practice, which lowers this feature's real-world value versus how it
+felt during today's flurry of test restarts. Worth sizing the
+implementation effort against actual restart frequency once issue #1
+is fully resolved, not building it reflexively.
+
+Implementation is a real lift, not a config tweak: `rpc-server` is a thin
+wrapper around upstream `ggml-rpc`'s protocol, which has no concept of
+persisting or short-circuiting a tensor transfer today -- this likely
+means patching `ggml-rpc.cpp` itself (add a local on-disk tensor cache
+keyed as above, checked before accepting a buffer from the client) rather
+than something buildable purely around the existing binaries the way the
+slot-pin-proxy was. Filed as
+[issue #3](https://github.com/RookiOS72/llama-shard/issues/3) for
+whenever this is worth picking up.
