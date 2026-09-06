@@ -7,7 +7,19 @@ this machine is head (serves the target model) or a tail (contributes
 compute), based on whether the model is present in this node's own Ollama
 store.
 
-## Status: scaffold (2026-09-06)
+## Status: scaffold, validated cross-node (2026-09-06)
+
+Ran for real on both node-a and node-b, not just locally -- node-a
+correctly self-declared head, discovered node-b as its one live peer
+(correctly excluding an unrelated machine on the same tailnet), and
+built the exact `llama-server` command already proven in production.
+See docs/LOG.md, "First real cross-node test of the scaffold" for the
+two real bugs that test surfaced and fixed (a missing liveness check,
+and a ~35s `socket.getfqdn()` hang on node-b specifically).
+
+Note for running this on node-b: its system `python3`
+(`/usr/bin/python3`) is 3.9.6, too old for this code's `X | None` type
+syntax. Use the Homebrew one instead: `/opt/homebrew/bin/python3`.
 
 Real and tested today:
 

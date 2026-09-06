@@ -568,3 +568,63 @@ no database or view layer.
 
 Full detail, the two-phase build split, and the open questions this left
 unresolved are in ARCHITECTURE.md, not repeated here.
+
+### First real cross-node test of the scaffold
+
+Cloned the repo onto node-b (it had none before) and ran the scaffolded
+`agent/` for real on both machines, not just locally on node-a.
+
+Found node-b's Python is old: `/usr/bin/python3` is 3.9.6, and the
+scaffold's `X | None` return-type syntax needs 3.10+. Not a code
+change -- node-b already has Homebrew's `/opt/homebrew/bin/python3`
+(3.14.7), just need to invoke that explicitly there rather than
+whatever `python3` resolves to first on PATH.
+
+Found a real bug the moment discovery ran against live Tailscale peers:
+without a liveness check, `tailscale status --json` returns *every*
+tailnet peer, not just Caravan nodes -- node-a's dry run discovered an
+unrelated machine (`prf-hays-mgmt`) and would have wired it into
+`llama-server --rpc` as an RPC device had it not been caught. This is
+exactly the gap ARCHITECTURE.md's open questions flagged ("what
+health-check surface"); turned out not optional the first time this ran
+against a real multi-peer tailnet. Added `health_server.py` (a tiny
+`/health` endpoint every agent exposes) and an `is_agent_alive()` gate in
+`caravan_agent.py` that only trusts a discovered peer if it actually
+answers as a Caravan agent.
+
+Then found a second real bug testing *that* fix cross-node: the health
+server hung for ~35 seconds on startup, but only on node-b. Isolated it
+in a few steps -- confirmed the hang was in constructing
+`ThreadingHTTPServer` itself (nothing app-specific), then confirmed
+`socket.getfqdn('0.0.0.0')` alone was the ~35s cost, called internally by
+`http.server.HTTPServer.server_bind()` to set `self.server_name`. Fixed
+by overriding `server_bind()` to skip that reverse-DNS-style lookup
+entirely -- nothing in this codebase uses `server_name`/`server_port` for
+anything, so there's no cost to not resolving them. Root cause of *why*
+that lookup is specifically slow on node-b's network config wasn't
+chased further; the fix doesn't depend on knowing why.
+
+Also needed a way to actually test mutual discovery at all: the one-shot
+dry run's health server dies the instant the process exits, which is
+close to immediately -- no window for a second machine's discovery pass
+to ever see it. Added `--serve-for SECONDS` to caravan_agent.py: keeps
+the health endpoint up for a fixed window without spawning/supervising
+anything, purely so two independently-launched dry runs can overlap long
+enough to see each other. Test-support flag, not part of the real design
+-- a persistent daemon mode is real future work (ARCHITECTURE.md doesn't
+resolve this yet either).
+
+With both fixes in place, ran the real test: started node-b's agent with
+`--serve-for 60`, then ran node-a's agent (plain dry run) while it was
+up. Result, exactly as designed: node-a self-declared head (has
+muse-glimmer locally), discovered precisely one live peer (node-b, via
+Tailscale, correctly excluding the unrelated tailnet machine this time),
+and built the identical `llama-server` command already proven in
+production tonight -- same blob path, same Tailscale IP, same
+`--device`/`--tensor-split`/`-c` values. First genuine end-to-end proof
+this design works against the real two-node setup, not just in isolation
+on node-a.
+
+Confirmed the live production processes (llama-server, the slot-pin
+proxy) were unaffected throughout -- everything above ran in dry-run
+mode, and test processes were cleaned up on both machines afterward.
